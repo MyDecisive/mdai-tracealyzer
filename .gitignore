@@ -17,8 +17,12 @@ coverage.*
 *.coverprofile
 profile.cov
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# Dependency directories
+vendor/
+
+# Local build outputs
+/mdai-tracealyzer
+mdai-tracealyzer-*.tgz
 
 # Go workspace file
 go.work
@@ -28,5 +32,5 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/

@@ -1,0 +1,23 @@
+ingestion:
+  otlp_grpc_endpoint: "0.0.0.0:14317"
+  otlp_http_endpoint: "0.0.0.0:14318"
+
+buffer:
+  valkey_addr: "valkey.internal:6379"
+  valkey_db: 2
+  quiet_period: "45s"
+  max_ttl: "8m"
+  sweep_interval: "3s"
+
+emitter:
+  greptimedb_endpoint: "greptimedb.internal:4001"
+  greptimedb_database: "traces"
+  table_name: "trace_topology_v2"
+  timeout: "15s"
+  max_retries: 5
+  initial_backoff: "500ms"
+
+service:
+  log_level: "debug"
+  metrics_endpoint: "0.0.0.0:19090"
+  shutdown_grace: "45s"

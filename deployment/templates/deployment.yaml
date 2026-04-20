@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mdai-tracealyzer.fullname" . }}
+  labels:
+    {{- include "mdai-tracealyzer.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mdai-tracealyzer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mdai-tracealyzer.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "mdai-tracealyzer.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ include "mdai-tracealyzer.name" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            - --config
+            - /etc/tracealyzer/config.yaml
+          ports:
+            - name: otlp-grpc
+              containerPort: {{ .Values.service.ports.otlpGrpc }}
+              protocol: TCP
+            - name: otlp-http
+              containerPort: {{ .Values.service.ports.otlpHttp }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.service.ports.metrics }}
+              protocol: TCP
+          {{- if or .Values.secrets.valkeyPassword.existingSecret .Values.secrets.greptimedbAuth.existingSecret }}
+          env:
+            {{- if .Values.secrets.valkeyPassword.existingSecret }}
+            - name: TRACEALYZER_BUFFER_VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.valkeyPassword.existingSecret | quote }}
+                  key: {{ .Values.secrets.valkeyPassword.key | quote }}
+            {{- end }}
+            {{- if .Values.secrets.greptimedbAuth.existingSecret }}
+            - name: TRACEALYZER_EMITTER_GREPTIMEDB_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.greptimedbAuth.existingSecret | quote }}
+                  key: {{ .Values.secrets.greptimedbAuth.key | quote }}
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: metrics
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: metrics
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tracealyzer
+              readOnly: true
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "mdai-tracealyzer.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
