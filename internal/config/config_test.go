@@ -73,16 +73,19 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 }
 
 func TestLoad_SecretsOnlyFromEnv(t *testing.T) {
-	t.Setenv("TRACEALYZER_BUFFER_VALKEY_PASSWORD", "s3cret")
-	t.Setenv("TRACEALYZER_EMITTER_GREPTIMEDB_AUTH", "tok3n")
+	valkeyPassword := testEnvValue(t, "valkey")
+	greptimeAuth := testEnvValue(t, "greptime")
+
+	t.Setenv("TRACEALYZER_BUFFER_VALKEY_PASSWORD", valkeyPassword)
+	t.Setenv("TRACEALYZER_EMITTER_GREPTIMEDB_AUTH", greptimeAuth)
 
 	cfg, err := config.Load(filepath.Join("testdata", "valid.yaml"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 
-	assertEqual(t, "s3cret", cfg.Buffer.ValkeyPassword)
-	assertEqual(t, "tok3n", cfg.Emitter.GreptimeDBAuth)
+	assertEqual(t, valkeyPassword, cfg.Buffer.ValkeyPassword)
+	assertEqual(t, greptimeAuth, cfg.Emitter.GreptimeDBAuth)
 }
 
 func TestLoad_YAMLSecretKeyRejected(t *testing.T) {
@@ -191,6 +194,11 @@ func writeTempYAML(t *testing.T, body []byte) string {
 		t.Fatalf("write temp yaml: %v", err)
 	}
 	return path
+}
+
+func testEnvValue(t *testing.T, name string) string {
+	t.Helper()
+	return "unit-test-" + name + "-" + strings.ReplaceAll(t.Name(), "/", "-")
 }
 
 func assertEqual[T comparable](t *testing.T, want, got T) {
