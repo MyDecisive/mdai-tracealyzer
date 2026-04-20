@@ -1,0 +1,419 @@
+2026-04-16T19:23:18.064Z info Traces    {"resource": {"service.instance.id": "2626c68f-4440-4001-bf50-913e94ba8276", "service.name": "otelcol-contrib", "service.version": "0.147.0"}, "otelcol.component.id": "debug", "otelcol.component.kind": "exporter", "otelcol.signal": "traces", "resource spans": 4, "spans": 9}
+2026-04-16T19:23:18.066Z info ResourceSpans #0
+Resource SchemaURL: https://opentelemetry.io/schemas/1.38.0
+Resource attributes:
+     -> telemetry.sdk.version: Str(v1.74.8)
+     -> telemetry.sdk.name: Str(Datadog)
+     -> telemetry.sdk.language: Str(go)
+     -> process.runtime.version: Str(1.26.2)
+     -> deployment.environment.name: Str(local)
+     -> service.version: Str(1.0.0)
+     -> service.name: Str(inventory-grpc-service)
+ScopeSpans #0
+ScopeSpans SchemaURL:
+InstrumentationScope Datadog v1.74.8
+Span #0
+    Trace ID       : 00000000000000005de71707b5a8e5ad
+    Parent ID      : 223e7a971442d8b9
+    ID             : 39de5bf81724cb37
+    Name           : InventoryService/ReserveItems
+    Kind           : Server
+    TraceState     : ot=th:0
+    Start time     : 2026-04-16 19:23:11.035565553 +0000 UTC
+    End time       : 2026-04-16 19:23:11.035638303 +0000 UTC
+    Status code    : Ok
+    Status message :
+    DroppedAttributesCount: 0
+    DroppedEventsCount: 0
+    DroppedLinksCount: 0
+Attributes:
+     -> dd.span.Resource: Str(InventoryService/ReserveItems)
+     -> sampling.priority: Str(2.000000)
+     -> datadog.span.id: Str(4169871426089962295)
+     -> datadog.trace.id: Str(6766402287027414445)
+     -> grpc.code: Str(OK)
+     -> deployment.environment.name: Str(local)
+     -> grpc.method.name: Str(/InventoryService/ReserveItems)
+     -> service.version: Str(1.0.0)
+     -> _dd.p.tid: Str(69e1371f00000000)
+     -> span.kind: Str(server)
+     -> language: Str(go)
+     -> grpc.method.kind: Str(unary)
+     -> scenario: Str(checkout-rollback-grpc)
+     -> rpc.service: Str(InventoryService)
+     -> _dd.p.dm: Str(-3)
+     -> request.id: Str(request-05d21b4ab844)
+     -> rpc.system: Str(grpc)
+     -> tracestate: Str(dd=s:2;p:223e7a971442d8b9;t.dm:-3;t.tid:69e1371f00000000)
+     -> component: Str(google.golang.org/grpc)
+     -> runtime-id: Str(2606f79c-08ce-4b8d-8283-3ec467268969)
+     -> rpc.grpc.full_method: Str(/InventoryService/ReserveItems)
+     -> rpc.method: Str(ReserveItems)
+     -> process.pid: Double(1)
+     -> _dd.top_level: Double(1)
+     -> _dd.profiling.enabled: Double(0)
+     -> _dd.trace_span_attribute_schema: Double(0)
+     -> _sampling_priority_v1: Double(2)
+     -> _top_level: Double(1)
+     -> rpc.grpc.status_code: Int(0)
+Span #1
+    Trace ID       : 00000000000000005de71707b5a8e5ad
+    Parent ID      : 4b257c913c5492d4
+    ID             : 5249469025098705
+    Name           : InventoryService/ReleaseReservation
+    Kind           : Server
+    TraceState     : ot=th:0
+    Start time     : 2026-04-16 19:23:11.037315928 +0000 UTC
+    End time       : 2026-04-16 19:23:11.037379428 +0000 UTC
+    Status code    : Ok
+    Status message :
+    DroppedAttributesCount: 0
+    DroppedEventsCount: 0
+    DroppedLinksCount: 0
+Attributes:
+     -> dd.span.Resource: Str(InventoryService/ReleaseReservation)
+     -> sampling.priority: Str(2.000000)
+     -> datadog.span.id: Str(5929347969320584965)
+     -> datadog.trace.id: Str(6766402287027414445)
+     -> scenario: Str(checkout-rollback-grpc)
+     -> grpc.method.name: Str(/InventoryService/ReleaseReservation)
+     -> span.kind: Str(server)
+     -> component: Str(google.golang.org/grpc)
+     -> rpc.system: Str(grpc)
+     -> runtime-id: Str(2606f79c-08ce-4b8d-8283-3ec467268969)
+     -> rpc.service: Str(InventoryService)
+     -> service.version: Str(1.0.0)
+     -> _dd.p.tid: Str(69e1371f00000000)
+     -> grpc.code: Str(OK)
+     -> deployment.environment.name: Str(local)
+     -> rpc.method: Str(ReleaseReservation)
+     -> tracestate: Str(dd=s:2;p:4b257c913c5492d4;t.dm:-3;t.tid:69e1371f00000000)
+     -> request.id: Str(request-05d21b4ab844)
+     -> language: Str(go)
+     -> grpc.method.kind: Str(unary)
+     -> rpc.grpc.full_method: Str(/InventoryService/ReleaseReservation)
+     -> _dd.p.dm: Str(-3)
+     -> process.pid: Double(1)
+     -> _dd.top_level: Double(1)
+     -> _dd.profiling.enabled: Double(0)
+     -> _dd.trace_span_attribute_schema: Double(0)
+     -> _sampling_priority_v1: Double(2)
+     -> _top_level: Double(1)
+     -> rpc.grpc.status_code: Int(0)
+ResourceSpans #1
+Resource SchemaURL: https://opentelemetry.io/schemas/1.38.0
+Resource attributes:
+     -> process.runtime.version: Str(1.26.2)
+     -> deployment.environment.name: Str(local)
+     -> service.version: Str(1.0.0)
+     -> telemetry.sdk.version: Str(v1.74.8)
+     -> telemetry.sdk.name: Str(Datadog)
+     -> telemetry.sdk.language: Str(go)
+     -> service.name: Str(payments-api)
+ScopeSpans #0
+ScopeSpans SchemaURL:
+InstrumentationScope Datadog v1.74.8
+Span #0
+    Trace ID       : 00000000000000005de71707b5a8e5ad
+    Parent ID      : 467eba217767c965
+    ID             : 35b398a1e844383d
+    Name           : GET /authorize
+    Kind           : Server
+    TraceState     : ot=th:0
+    Start time     : 2026-04-16 19:23:11.036791136 +0000 UTC
+    End time       : 2026-04-16 19:23:11.036879511 +0000 UTC
+    Status code    : Ok
+    Status message :
+    DroppedAttributesCount: 0
+    DroppedEventsCount: 0
+    DroppedLinksCount: 0
+Attributes:
+     -> dd.span.Resource: Str(GET /authorize)
+     -> sampling.priority: Str(2.000000)
+     -> datadog.span.id: Str(3869604325995329597)
+     -> datadog.trace.id: Str(6766402287027414445)
+     -> tracestate: Str(dd=s:2;p:467eba217767c965;t.dm:-3;t.tid:69e1371f00000000)
+     -> url.full: Str(http://payments-api:8080/authorize?rollback=true&scenario=checkout-rollback-grpc)
+     -> _dd.p.tid: Str(69e1371f00000000)
+     -> deployment.environment.name: Str(local)
+     -> runtime-id: Str(df970191-e823-401c-90b8-d65eb0db57fd)
+     -> component: Str(net/http)
+     -> _dd.p.dm: Str(-3)
+     -> span.kind: Str(server)
+     -> service.version: Str(1.0.0)
+     -> scenario: Str(checkout-rollback-grpc)
+     -> http.route: Str(/authorize)
+     -> http.response.status_code: Str(200)
+     -> request.id: Str(request-05d21b4ab844)
+     -> language: Str(go)
+     -> http.host: Str(payments-api:8080)
+     -> user_agent.original: Str(Go-http-client/1.1)
+     -> http.request.method: Str(GET)
+     -> _top_level: Double(1)
+     -> process.pid: Double(1)
+     -> _dd.top_level: Double(1)
+     -> _dd.profiling.enabled: Double(0)
+     -> _dd.trace_span_attribute_schema: Double(0)
+     -> _sampling_priority_v1: Double(2)
+ResourceSpans #2
+Resource SchemaURL: https://opentelemetry.io/schemas/1.38.0
+Resource attributes:
+     -> service.version: Str(1.0.0)
+     -> telemetry.sdk.version: Str(v1.74.8)
+     -> telemetry.sdk.name: Str(Datadog)
+     -> telemetry.sdk.language: Str(go)
+     -> process.runtime.version: Str(1.26.2)
+     -> deployment.environment.name: Str(local)
+     -> service.name: Str(checkout-api)
+ScopeSpans #0
+ScopeSpans SchemaURL:
+InstrumentationScope Datadog v1.74.8
+Span #0
+    Trace ID       : 00000000000000005de71707b5a8e5ad
+    Parent ID      : 2af47e3830a97ca9
+    ID             : 01e5569a056053f8
+    Name           : GET /checkout
+    Kind           : Server
+    TraceState     : ot=th:0
+    Start time     : 2026-04-16 19:23:11.035059553 +0000 UTC
+    End time       : 2026-04-16 19:23:11.037550095 +0000 UTC
+    Status code    : Ok
+    Status message :
+    DroppedAttributesCount: 0
+    DroppedEventsCount: 0
+    DroppedLinksCount: 0
+Attributes:
+     -> dd.span.Resource: Str(GET /checkout)
+     -> sampling.priority: Str(2.000000)
+     -> datadog.span.id: Str(136610583219819512)
+     -> datadog.trace.id: Str(6766402287027414445)
+     -> http.request.method: Str(GET)
+     -> _dd.p.dm: Str(-3)
+     -> service.version: Str(1.0.0)
+     -> url.full: Str(http://checkout-api:8080/checkout?rollback=true&scenario=checkout-rollback-grpc&transport=grpc)
+     -> language: Str(go)
+     -> deployment.environment.name: Str(local)
+     -> tracestate: Str(dd=s:2;p:2af47e3830a97ca9;t.dm:-3;t.tid:69e1371f00000000)
+     -> _dd.p.tid: Str(69e1371f00000000)
+     -> user_agent.original: Str(Go-http-client/1.1)
+     -> http.response.status_code: Str(200)
+     -> span.kind: Str(server)
+     -> http.host: Str(checkout-api:8080)
+     -> http.route: Str(/checkout)
+     -> scenario: Str(checkout-rollback-grpc)
+     -> runtime-id: Str(4a6a98bb-d677-4096-a862-fcc9939354db)
+     -> component: Str(net/http)
+     -> request.id: Str(request-05d21b4ab844)
+     -> _sampling_priority_v1: Double(2)
+     -> _top_level: Double(1)
+     -> process.pid: Double(1)
+     -> _dd.top_level: Double(1)
+     -> _dd.profiling.enabled: Double(0)
+     -> _dd.trace_span_attribute_schema: Double(0)
+Span #1
+    Trace ID       : 00000000000000005de71707b5a8e5ad
+    Parent ID      : 01e5569a056053f8
+    ID             : 223e7a971442d8b9
+    Name           : InventoryService/ReserveItems
+    Kind           : Client
+    TraceState     : ot=th:0
+    Start time     : 2026-04-16 19:23:11.035187803 +0000 UTC
+    End time       : 2026-04-16 19:23:11.035799178 +0000 UTC
+    Status code    : Ok
+    Status message :
+    DroppedAttributesCount: 0
+    DroppedEventsCount: 0
+    DroppedLinksCount: 0
+Attributes:
+     -> dd.span.Resource: Str(/InventoryService/ReserveItems)
+     -> sampling.priority: Str(2.000000)
+     -> datadog.span.id: Str(2467544435144186041)
+     -> datadog.trace.id: Str(6766402287027414445)
+     -> span.kind: Str(client)
+     -> grpc.code: Str(OK)
+     -> service.version: Str(1.0.0)
+     -> component: Str(google.golang.org/grpc)
+     -> out.host: Str(172.18.0.5)
+     -> peer.hostname: Str(inventory-grpc-service)
+     -> language: Str(go)
+     -> grpc.method.name: Str(/InventoryService/ReserveItems)
+     -> rpc.grpc.full_method: Str(/InventoryService/ReserveItems)
+     -> rpc.service: Str(InventoryService)
+     -> deployment.environment.name: Str(local)
+     -> out.port: Str(50051)
+     -> grpc.method.kind: Str(unary)
+     -> rpc.system: Str(grpc)
+     -> runtime-id: Str(4a6a98bb-d677-4096-a862-fcc9939354db)
+     -> process.pid: Double(1)
+     -> _sampling_priority_v1: Double(2)
+     -> server.address: Str(inventory-grpc-service)
+     -> rpc.grpc.status_code: Int(0)
+     -> rpc.method: Str(ReserveItems)
+Span #2
+    Trace ID       : 00000000000000005de71707b5a8e5ad
+    Parent ID      : 01e5569a056053f8
+    ID             : 467eba217767c965
+    Name           : GET /authorize
+    Kind           : Client
+    TraceState     : ot=th:0
+    Start time     : 2026-04-16 19:23:11.035894178 +0000 UTC
+    End time       : 2026-04-16 19:23:11.036987386 +0000 UTC
+    Status code    : Ok
+    Status message :
+    DroppedAttributesCount: 0
+    DroppedEventsCount: 0
+    DroppedLinksCount: 0
+Attributes:
+     -> dd.span.Resource: Str(GET /authorize)
+     -> sampling.priority: Str(2.000000)
+     -> datadog.span.id: Str(5079702082620475749)
+     -> datadog.trace.id: Str(6766402287027414445)
+     -> http.response.status_code: Str(200)
+     -> http.route: Str(/authorize)
+     -> runtime-id: Str(4a6a98bb-d677-4096-a862-fcc9939354db)
+     -> url.full: Str(http://payments-api:8080/authorize?rollback=true&scenario=checkout-rollback-grpc)
+     -> http.request.method: Str(GET)
+     -> language: Str(go)
+     -> service.version: Str(1.0.0)
+     -> span.kind: Str(client)
+     -> component: Str(net/http)
+     -> scenario: Str(checkout-rollback-grpc)
+     -> deployment.environment.name: Str(local)
+     -> network.destination.name: Str(payments-api)
+     -> request.id: Str(request-05d21b4ab844)
+     -> _sampling_priority_v1: Double(2)
+     -> process.pid: Double(1)
+     -> network.destination.port: Double(8080)
+Span #3
+    Trace ID       : 00000000000000005de71707b5a8e5ad
+    Parent ID      : 01e5569a056053f8
+    ID             : 4b257c913c5492d4
+    Name           : InventoryService/ReleaseReservation
+    Kind           : Client
+    TraceState     : ot=th:0
+    Start time     : 2026-04-16 19:23:11.03708272 +0000 UTC
+    End time       : 2026-04-16 19:23:11.037491178 +0000 UTC
+    Status code    : Ok
+    Status message :
+    DroppedAttributesCount: 0
+    DroppedEventsCount: 0
+    DroppedLinksCount: 0
+Attributes:
+     -> dd.span.Resource: Str(/InventoryService/ReleaseReservation)
+     -> sampling.priority: Str(2.000000)
+     -> datadog.span.id: Str(5414871090207167188)
+     -> datadog.trace.id: Str(6766402287027414445)
+     -> deployment.environment.name: Str(local)
+     -> runtime-id: Str(4a6a98bb-d677-4096-a862-fcc9939354db)
+     -> rpc.system: Str(grpc)
+     -> grpc.method.name: Str(/InventoryService/ReleaseReservation)
+     -> language: Str(go)
+     -> peer.hostname: Str(inventory-grpc-service)
+     -> span.kind: Str(client)
+     -> out.host: Str(172.18.0.5)
+     -> component: Str(google.golang.org/grpc)
+     -> grpc.method.kind: Str(unary)
+     -> service.version: Str(1.0.0)
+     -> out.port: Str(50051)
+     -> grpc.code: Str(OK)
+     -> rpc.grpc.full_method: Str(/InventoryService/ReleaseReservation)
+     -> rpc.service: Str(InventoryService)
+     -> process.pid: Double(1)
+     -> _sampling_priority_v1: Double(2)
+     -> server.address: Str(inventory-grpc-service)
+     -> rpc.grpc.status_code: Int(0)
+     -> rpc.method: Str(ReleaseReservation)
+ResourceSpans #3
+Resource SchemaURL: https://opentelemetry.io/schemas/1.38.0
+Resource attributes:
+     -> telemetry.sdk.language: Str(go)
+     -> process.runtime.version: Str(1.26.2)
+     -> deployment.environment.name: Str(local)
+     -> service.version: Str(1.0.0)
+     -> telemetry.sdk.version: Str(v1.74.8)
+     -> telemetry.sdk.name: Str(Datadog)
+     -> service.name: Str(gateway-api)
+ScopeSpans #0
+ScopeSpans SchemaURL:
+InstrumentationScope Datadog v1.74.8
+Span #0
+    Trace ID       : 00000000000000005de71707b5a8e5ad
+    Parent ID      :
+    ID             : 5de71707b5a8e5ad
+    Name           : GET /checkout
+    Kind           : Server
+    TraceState     : ot=th:0
+    Start time     : 2026-04-16 19:23:11.033744136 +0000 UTC
+    End time       : 2026-04-16 19:23:11.037777803 +0000 UTC
+    Status code    : Ok
+    Status message :
+    DroppedAttributesCount: 0
+    DroppedEventsCount: 0
+    DroppedLinksCount: 0
+Attributes:
+     -> dd.span.Resource: Str(GET /checkout)
+     -> sampling.priority: Str(2.000000)
+     -> datadog.span.id: Str(6766402287027414445)
+     -> datadog.trace.id: Str(6766402287027414445)
+     -> http.host: Str(gateway-api:8080)
+     -> http.response.status_code: Str(200)
+     -> span.kind: Str(server)
+     -> runtime-id: Str(1ab1fecd-f94e-442b-8690-376caa872e6f)
+     -> _dd.p.dm: Str(-3)
+     -> _dd.p.tid: Str(69e1371f00000000)
+     -> request.id: Str(request-05d21b4ab844)
+     -> scenario: Str(checkout-rollback-grpc)
+     -> user_agent.original: Str(Go-http-client/1.1)
+     -> http.request.method: Str(GET)
+     -> http.route: Str(/checkout)
+     -> component: Str(net/http)
+     -> language: Str(go)
+     -> service.version: Str(1.0.0)
+     -> url.full: Str(http://gateway-api:8080/checkout?rollback=true&scenario=checkout-rollback-grpc&transport=grpc)
+     -> deployment.environment.name: Str(local)
+     -> _dd.profiling.enabled: Double(0)
+     -> _dd.rule_psr: Double(1)
+     -> process.pid: Double(1)
+     -> _dd.trace_span_attribute_schema: Double(0)
+     -> _dd.limit_psr: Double(1)
+     -> _sampling_priority_v1: Double(2)
+     -> _top_level: Double(1)
+     -> _dd.top_level: Double(1)
+Span #1
+    Trace ID       : 00000000000000005de71707b5a8e5ad
+    Parent ID      : 5de71707b5a8e5ad
+    ID             : 2af47e3830a97ca9
+    Name           : GET /checkout
+    Kind           : Client
+    TraceState     : ot=th:0
+    Start time     : 2026-04-16 19:23:11.033922261 +0000 UTC
+    End time       : 2026-04-16 19:23:11.037658761 +0000 UTC
+    Status code    : Ok
+    Status message :
+    DroppedAttributesCount: 0
+    DroppedEventsCount: 0
+    DroppedLinksCount: 0
+Attributes:
+     -> dd.span.Resource: Str(GET /checkout)
+     -> sampling.priority: Str(2.000000)
+     -> datadog.span.id: Str(3095237623710055593)
+     -> datadog.trace.id: Str(6766402287027414445)
+     -> runtime-id: Str(1ab1fecd-f94e-442b-8690-376caa872e6f)
+     -> http.request.method: Str(GET)
+     -> scenario: Str(checkout-rollback-grpc)
+     -> http.route: Str(/checkout)
+     -> network.destination.name: Str(checkout-api)
+     -> http.response.status_code: Str(200)
+     -> request.id: Str(request-05d21b4ab844)
+     -> component: Str(net/http)
+     -> service.version: Str(1.0.0)
+     -> url.full: Str(http://checkout-api:8080/checkout?rollback=true&scenario=checkout-rollback-grpc&transport=grpc)
+     -> deployment.environment.name: Str(local)
+     -> language: Str(go)
+     -> span.kind: Str(client)
+     -> process.pid: Double(1)
+     -> network.destination.port: Double(8080)
+     -> _sampling_priority_v1: Double(2)
+     {"resource": {"service.instance.id": "2626c68f-4440-4001-bf50-913e94ba8276", "service.name": "otelcol-contrib", "service.version": "0.147.0"}, "otelcol.component.id": "debug", "otelcol.component.kind": "exporter", "otelcol.signal": "traces"}
+
+

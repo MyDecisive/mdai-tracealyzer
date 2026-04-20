@@ -1,0 +1,172 @@
+x-traced-service-env: &traced-service-env
+  DD_ENV: local
+  DD_LOGS_INJECTION: "true"
+  DD_TRACE_AGENT_URL: http://agent:8126
+  DD_TRACE_SAMPLE_RATE: "1.0"
+  DD_TRACE_RATE_LIMIT: "1000000"
+  DD_TRACE_128_BIT_TRACEID_GENERATION_ENABLED: "true"
+  DD_VERSION: 1.0.0
+
+services:
+  agent:
+    image: gcr.io/datadoghq/agent:7
+    environment:
+      DD_API_KEY: dummy-api-key
+      DD_SITE: datadoghq-123.com
+      DD_DD_URL: http://host.docker.internal:18126
+      DD_HOSTNAME: local-datadog-agent-test-stand
+      DD_APM_ENABLED: "true"
+      DD_APM_NON_LOCAL_TRAFFIC: "true"
+      DD_APM_DD_URL: http://host.docker.internal:18126
+      DD_APM_MAX_TPS: "1000000"
+      DD_APM_ERROR_TPS: "1000000"
+      DD_APM_MAX_EPS: "1000000"
+      DD_APM_DISABLE_RARE_SAMPLER: "true"
+      DD_LOGS_ENABLED: "true"
+      DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL: "false"
+      DD_LOGS_CONFIG_USE_HTTP: "true"
+      DD_LOGS_CONFIG_FORCE_USE_HTTP: "true"
+      DD_LOGS_CONFIG_LOGS_DD_URL: host.docker.internal:18126
+      DD_LOGS_CONFIG_LOGS_NO_SSL: "true"
+      DD_REMOTE_CONFIGURATION_ENABLED: "false"
+      DD_INVENTORIES_ENABLED: "false"
+      DD_PROCESS_AGENT_ENABLED: "false"
+      DD_ENABLE_PAYLOADS_EVENTS: "false"
+      DD_ENABLE_PAYLOADS_SERIES: "false"
+      DD_ENABLE_PAYLOADS_SERVICE_CHECKS: "false"
+      DD_ENABLE_PAYLOADS_SKETCHES: "false"
+      DD_CONTAINER_IMAGE_ENABLED: "false"
+      DD_CONTAINER_EXCLUDE: image:gcr.io/datadoghq/agent:*
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+  demo-control:
+    build:
+      context: ./demo
+      args:
+        SERVICE: demo-control
+    depends_on:
+      - agent
+      - gateway-api
+    environment:
+      GATEWAY_URL: http://gateway-api:8080
+      PORT: "8080"
+    labels:
+      com.datadoghq.ad.logs: >-
+        [{"type":"docker","source":"go","service":"demo-control"}]
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+
+  gateway-api:
+    build:
+      context: ./demo
+      args:
+        SERVICE: gateway-api
+    depends_on:
+      - agent
+      - catalog-api
+      - checkout-api
+      - inventory-http-api
+      - inventory-grpc-service
+    environment:
+      <<: *traced-service-env
+      DD_GRPC_SERVICE: gateway-api
+      DD_SERVICE: gateway-api
+      PORT: "8080"
+      CATALOG_URL: http://catalog-api:8080
+      CHECKOUT_URL: http://checkout-api:8080
+      INVENTORY_HTTP_URL: http://inventory-http-api:8080
+      INVENTORY_GRPC_TARGET: inventory-grpc-service:50051
+    labels:
+      com.datadoghq.ad.logs: >-
+        [{"type":"docker","source":"go","service":"gateway-api"}]
+    restart: unless-stopped
+
+  catalog-api:
+    build:
+      context: ./demo
+      args:
+        SERVICE: catalog-api
+    depends_on:
+      - agent
+    environment:
+      <<: *traced-service-env
+      DD_SERVICE: catalog-api
+      PORT: "8080"
+    labels:
+      com.datadoghq.ad.logs: >-
+        [{"type":"docker","source":"go","service":"catalog-api"}]
+    restart: unless-stopped
+
+  checkout-api:
+    build:
+      context: ./demo
+      args:
+        SERVICE: checkout-api
+    depends_on:
+      - agent
+      - inventory-http-api
+      - inventory-grpc-service
+      - payments-api
+    environment:
+      <<: *traced-service-env
+      DD_GRPC_SERVICE: checkout-api
+      DD_SERVICE: checkout-api
+      PORT: "8080"
+      PAYMENTS_URL: http://payments-api:8080
+      INVENTORY_HTTP_URL: http://inventory-http-api:8080
+      INVENTORY_GRPC_TARGET: inventory-grpc-service:50051
+    labels:
+      com.datadoghq.ad.logs: >-
+        [{"type":"docker","source":"go","service":"checkout-api"}]
+    restart: unless-stopped
+
+  payments-api:
+    build:
+      context: ./demo
+      args:
+        SERVICE: payments-api
+    depends_on:
+      - agent
+    environment:
+      <<: *traced-service-env
+      DD_SERVICE: payments-api
+      PORT: "8080"
+    labels:
+      com.datadoghq.ad.logs: >-
+        [{"type":"docker","source":"go","service":"payments-api"}]
+    restart: unless-stopped
+
+  inventory-http-api:
+    build:
+      context: ./demo
+      args:
+        SERVICE: inventory-http-api
+    depends_on:
+      - agent
+    environment:
+      <<: *traced-service-env
+      DD_SERVICE: inventory-http-api
+      PORT: "8080"
+    labels:
+      com.datadoghq.ad.logs: >-
+        [{"type":"docker","source":"go","service":"inventory-http-api"}]
+    restart: unless-stopped
+
+  inventory-grpc-service:
+    build:
+      context: ./demo
+      args:
+        SERVICE: inventory-grpc-service
+    depends_on:
+      - agent
+    environment:
+      <<: *traced-service-env
+      DD_SERVICE: inventory-grpc-service
+      GRPC_PORT: "50051"
+    labels:
+      com.datadoghq.ad.logs: >-
+        [{"type":"docker","source":"go","service":"inventory-grpc-service"}]
+    restart: unless-stopped

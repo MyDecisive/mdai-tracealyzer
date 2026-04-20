@@ -1,0 +1,33 @@
+# VCS and tooling
+.git
+.gitignore
+.github
+.idea
+
+# Docs and project metadata (not needed in the image)
+*.md
+docs
+AGENTS.md
+CLAUDE*.md
+LICENSE
+
+# Dev-only trees
+test-stand
+samples
+deployment
+mocks
+
+# Build and test artifacts
+coverage.*
+*.out
+*.test
+dist
+bin
+
+# Self
+.dockerignore
+Dockerfile
+
+# Editor / OS noise
+.DS_Store
+*.swp

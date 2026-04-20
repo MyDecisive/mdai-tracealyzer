@@ -1,0 +1,15 @@
+{{- $fullName := include "mdai-tracealyzer.fullname" . -}}
+Tracealyzer is deployed as {{ $fullName }} in namespace {{ .Release.Namespace }}.
+
+OTLP traffic is received on ports {{ .Values.service.ports.otlpGrpc }} (gRPC) and {{ .Values.service.ports.otlpHttp }} (HTTP).
+Prometheus metrics and health probes are served on port {{ .Values.service.ports.metrics }}.
+{{- if gt (int .Values.replicaCount) 1 }}
+
+WARNING: replicaCount is set to {{ .Values.replicaCount }}.
+
+mdai-tracealyzer is single-replica by default. Running multiple replicas
+without trace-ID-affine ingest produces partial, duplicated topology metrics
+per pod. The supported configuration for horizontal scale is an upstream
+OTel Collector using loadbalancingexporter with routing_key: traceID,
+pointing at this Service.
+{{- end }}

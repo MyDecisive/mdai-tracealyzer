@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+service InventoryService {
+  rpc CheckAvailability (InventoryRequest) returns (InventoryReply);
+  rpc ReserveItems (InventoryRequest) returns (InventoryReply);
+  rpc ReleaseReservation (ReleaseReservationRequest) returns (InventoryReply);
+}
+
+message InventoryRequest {
+  string request_id = 1;
+  string scenario = 2;
+  string sku = 3;
+  int32 quantity = 4;
+}
+
+message ReleaseReservationRequest {
+  string request_id = 1;
+  string scenario = 2;
+  string reservation_id = 3;
+}
+
+message InventoryReply {
+  string request_id = 1;
+  string scenario = 2;
+  bool success = 3;
+  string status = 4;
+  string reservation_id = 5;
+  string warehouse = 6;
+  int32 available = 7;
+}
