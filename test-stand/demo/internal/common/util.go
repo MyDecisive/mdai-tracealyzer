@@ -41,3 +41,14 @@ func BoolString(value bool) string {
 	}
 	return "false"
 }
+
+func ReservationID(requestID string) string {
+	suffix := strings.TrimSpace(requestID)
+	if suffix == "" {
+		suffix = NewRequestID()
+	}
+	if len(suffix) > 6 {
+		suffix = suffix[len(suffix)-6:]
+	}
+	return "reservation-" + suffix
+}
