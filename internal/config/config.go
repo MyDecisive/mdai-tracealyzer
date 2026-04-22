@@ -217,7 +217,7 @@ func defaults() Config {
 			GreptimeDBEndpoint: "greptimedb:4001",
 			GreptimeDBDatabase: "public",
 			GreptimeDBAuth:     "",
-			TableName:          "trace_topology",
+			TableName:          "trace_root_topology",
 			Timeout:            Duration(defaultEmitterTimeout),
 			MaxRetries:         defaultMaxRetries,
 			InitialBackoff:     Duration(defaultInitialBackoff),

@@ -27,7 +27,7 @@ func TestLoad_DefaultsWhenNoPath(t *testing.T) {
 	assertDuration(t, 5*time.Second, cfg.Buffer.SweepInterval)
 	assertEqual(t, "greptimedb:4001", cfg.Emitter.GreptimeDBEndpoint)
 	assertEqual(t, "public", cfg.Emitter.GreptimeDBDatabase)
-	assertEqual(t, "trace_topology", cfg.Emitter.TableName)
+	assertEqual(t, "trace_root_topology", cfg.Emitter.TableName)
 	assertEqual(t, 3, cfg.Emitter.MaxRetries)
 	assertDuration(t, 10*time.Second, cfg.Emitter.Timeout)
 	assertDuration(t, time.Second, cfg.Emitter.InitialBackoff)

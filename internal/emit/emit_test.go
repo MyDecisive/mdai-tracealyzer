@@ -85,8 +85,8 @@ func TestEmitterFlushesOnBatchSize(t *testing.T) {
 	}
 
 	batch := writer.lastBatch()
-	if batch.Table != "trace_topology" {
-		t.Fatalf("want table trace_topology, got %q", batch.Table)
+	if batch.Table != "trace_root_topology" {
+		t.Fatalf("want table trace_root_topology, got %q", batch.Table)
 	}
 	if len(batch.Rows) != 2 {
 		t.Fatalf("want 2 rows, got %d", len(batch.Rows))
@@ -301,7 +301,7 @@ func sampleRows(n int) []RootMetrics {
 
 func testEmitterConfig() config.Emitter {
 	return config.Emitter{
-		TableName:      "trace_topology",
+		TableName:      "trace_root_topology",
 		Timeout:        config.Duration(time.Second),
 		MaxRetries:     2,
 		InitialBackoff: config.Duration(time.Millisecond),

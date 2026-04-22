@@ -6,7 +6,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"sync/atomic"
 
 	gpb "github.com/GreptimeTeam/greptime-proto/go/greptime/v1"
 	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
@@ -23,23 +22,15 @@ type sdkClient interface {
 }
 
 type greptimeWriter struct {
-	logger    *zap.Logger
-	client    sdkClient
-	tableName string
-
-	tableReady atomic.Bool
+	client sdkClient
 }
 
-func newGreptimeWriter(cfg config.Emitter, logger *zap.Logger) (writer, error) {
+func newGreptimeWriter(cfg config.Emitter, _ *zap.Logger) (writer, error) {
 	client, err := newGreptimeClient(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &greptimeWriter{
-		logger:    logger,
-		client:    client,
-		tableName: cfg.TableName,
-	}, nil
+	return &greptimeWriter{client: client}, nil
 }
 
 func newGreptimeClient(cfg config.Emitter) (sdkClient, error) {
@@ -67,30 +58,11 @@ func (w *greptimeWriter) Write(ctx context.Context, batch writeBatch) error {
 		return err
 	}
 
-	if w.tableReady.Load() {
-		_, err := w.client.Write(withAutoCreateHint(ctx, true), tbl)
+	resp, err := w.client.Write(withAutoCreateHint(ctx, true), tbl)
+	if err != nil {
 		return err
 	}
-
-	_, err = w.client.Write(withAutoCreateHint(ctx, false), tbl)
-	if err == nil {
-		w.tableReady.Store(true)
-		return nil
-	}
-	if !isTableMissingError(err) {
-		return err
-	}
-
-	w.logger.Info("GreptimeDB table does not exist; attempting to create it",
-		zap.String("table_name", w.tableName),
-	)
-
-	if _, err := w.client.Write(withAutoCreateHint(ctx, true), tbl); err != nil {
-		return fmt.Errorf("create missing table %q: %w", w.tableName, err)
-	}
-
-	w.tableReady.Store(true)
-	return nil
+	return responseError(resp)
 }
 
 func (w *greptimeWriter) Close() error {
@@ -193,16 +165,13 @@ func parseAuth(raw string) (string, string) {
 	return "", raw
 }
 
-// TODO: use error code instead?
-func isTableMissingError(err error) bool {
-	if err == nil {
-		return false
+func responseError(resp *gpb.GreptimeResponse) error {
+	status := resp.GetHeader().GetStatus()
+	if status.GetStatusCode() == 0 {
+		return nil
 	}
-	msg := strings.ToLower(err.Error())
-	if !strings.Contains(msg, "table") {
-		return false
-	}
-	return strings.Contains(msg, "not found") ||
-		strings.Contains(msg, "does not exist") ||
-		strings.Contains(msg, "not exist")
+	return fmt.Errorf("greptimedb write failed: status_code=%d err_msg=%q",
+		status.GetStatusCode(),
+		status.GetErrMsg(),
+	)
 }

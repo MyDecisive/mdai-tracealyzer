@@ -10,13 +10,11 @@ import (
 	gpb "github.com/GreptimeTeam/greptime-proto/go/greptime/v1"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table"
 	"google.golang.org/grpc/metadata"
-
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest/observer"
 )
 
 type fakeSDKClient struct {
 	errs   []error
+	resps  []*gpb.GreptimeResponse
 	writes []sdkWriteCall
 }
 
@@ -39,87 +37,104 @@ func (c *fakeSDKClient) Write(ctx context.Context, tables ...*table.Table) (*gpb
 	})
 
 	if len(c.errs) == 0 {
-		return &gpb.GreptimeResponse{}, nil
+		return c.nextResponse(), nil
 	}
 	err := c.errs[0]
 	c.errs = c.errs[1:]
 	if err != nil {
 		return nil, err
 	}
-	return &gpb.GreptimeResponse{}, nil
+	return c.nextResponse(), nil
+}
+
+func (c *fakeSDKClient) nextResponse() *gpb.GreptimeResponse {
+	if len(c.resps) == 0 {
+		return &gpb.GreptimeResponse{}
+	}
+	resp := c.resps[0]
+	c.resps = c.resps[1:]
+	return resp
 }
 
 func (c *fakeSDKClient) Close() error {
 	return nil
 }
 
-func TestGreptimeWriterWarnsAndCreatesMissingTable(t *testing.T) {
+func TestGreptimeWriterAlwaysUsesAutoCreateTable(t *testing.T) {
 	t.Parallel()
 
-	core, logs := observer.New(zap.InfoLevel)
-	client := &fakeSDKClient{
-		errs: []error{
-			errors.New("table trace_topology not found"),
-			nil,
-		},
-	}
+	client := &fakeSDKClient{}
 	writer := &greptimeWriter{
-		logger:    zap.New(core),
-		client:    client,
-		tableName: "trace_topology",
+		client: client,
 	}
 
-	err := writer.Write(context.Background(), makeWriteBatch("trace_topology", sampleRows(1), time.Unix(1, 0)))
+	err := writer.Write(context.Background(), makeWriteBatch("trace_root_topology", sampleRows(1), time.Unix(1, 0)))
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
-	if len(client.writes) != 2 {
-		t.Fatalf("want 2 write attempts, got %d", len(client.writes))
+	if len(client.writes) != 1 {
+		t.Fatalf("want 1 write attempt, got %d", len(client.writes))
 	}
-	if client.writes[0].autoCreate != "false" {
-		t.Fatalf("first write auto_create_table = %q, want false", client.writes[0].autoCreate)
+	if client.writes[0].autoCreate != "true" {
+		t.Fatalf("write auto_create_table = %q, want true", client.writes[0].autoCreate)
 	}
-	if client.writes[1].autoCreate != "true" {
-		t.Fatalf("second write auto_create_table = %q, want true", client.writes[1].autoCreate)
-	}
-	if logs.Len() != 1 {
-		t.Fatalf("want 1 info log, got %d", logs.Len())
+	if client.writes[0].table != "trace_root_topology" {
+		t.Fatalf("write table = %q, want trace_root_topology", client.writes[0].table)
 	}
 }
 
-func TestGreptimeWriterReturnsErrorWhenTableCreationFails(t *testing.T) {
+func TestGreptimeWriterReturnsTransportError(t *testing.T) {
 	t.Parallel()
 
-	core, logs := observer.New(zap.InfoLevel)
 	client := &fakeSDKClient{
-		errs: []error{
-			errors.New("table trace_topology not found"),
-			errors.New("permission denied"),
-		},
+		errs: []error{errors.New("permission denied")},
 	}
 	writer := &greptimeWriter{
-		logger:    zap.New(core),
-		client:    client,
-		tableName: "trace_topology",
+		client: client,
 	}
 
-	err := writer.Write(context.Background(), makeWriteBatch("trace_topology", sampleRows(1), time.Unix(1, 0)))
+	err := writer.Write(context.Background(), makeWriteBatch("trace_root_topology", sampleRows(1), time.Unix(1, 0)))
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "create missing table") {
+	if !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if logs.Len() != 1 {
-		t.Fatalf("want 1 info log, got %d", logs.Len())
+}
+
+func TestGreptimeWriterReturnsResponseStatusError(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeSDKClient{
+		resps: []*gpb.GreptimeResponse{
+			{
+				Header: &gpb.ResponseHeader{
+					Status: &gpb.Status{
+						StatusCode: 1234,
+						ErrMsg:     "bad schema",
+					},
+				},
+			},
+		},
+	}
+	writer := &greptimeWriter{
+		client: client,
+	}
+
+	err := writer.Write(context.Background(), makeWriteBatch("trace_root_topology", sampleRows(1), time.Unix(1, 0)))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "status_code=1234") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestBuildTableMapsSchema(t *testing.T) {
 	t.Parallel()
 
-	tbl, err := buildTable(makeWriteBatch("trace_topology", sampleRows(1), time.Unix(1, 2)))
+	tbl, err := buildTable(makeWriteBatch("trace_root_topology", sampleRows(1), time.Unix(1, 2)))
 	if err != nil {
 		t.Fatalf("buildTable: %v", err)
 	}
@@ -129,8 +144,8 @@ func TestBuildTableMapsSchema(t *testing.T) {
 		t.Fatalf("ToInsertRequest: %v", err)
 	}
 
-	if req.TableName != "trace_topology" {
-		t.Fatalf("want table trace_topology, got %q", req.TableName)
+	if req.TableName != "trace_root_topology" {
+		t.Fatalf("want table trace_root_topology, got %q", req.TableName)
 	}
 	if got := len(req.Rows.Schema); got != 12 {
 		t.Fatalf("want 12 columns, got %d", got)

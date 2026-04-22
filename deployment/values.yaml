@@ -42,7 +42,7 @@ config:
   emitter:
     greptimedbEndpoint: "greptimedb:4001"
     greptimedbDatabase: "public"
-    tableName: "trace_topology"
+    tableName: "trace_root_topology"
     timeout: "10s"
     maxRetries: 3
     initialBackoff: "1s"
