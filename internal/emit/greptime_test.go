@@ -47,7 +47,8 @@ func (c *fakeSDKClient) Write(ctx context.Context, tables ...*table.Table) (*gpb
 	return c.nextResponse(), nil
 }
 
-func (_ *fakeSDKClient) Close() error {
+//nolint:revive // Keep the receiver name consistent with other fakeSDKClient methods.
+func (c *fakeSDKClient) Close() error {
 	return nil
 }
 

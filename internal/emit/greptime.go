@@ -167,7 +167,8 @@ func splitEndpoint(endpoint string) (string, int, error) {
 	return host, port, nil
 }
 
-func parseAuth(raw string) (username string, password string) {
+//nolint:revive // Two strings are intentional here: GreptimeDB SDK needs username and password separately.
+func parseAuth(raw string) (string, string) {
 	if raw == "" {
 		return "", ""
 	}
