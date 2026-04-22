@@ -16,6 +16,9 @@ emitter:
   timeout: "15s"
   max_retries: 5
   initial_backoff: "500ms"
+  batch_size: 250
+  flush_interval: "2s"
+  queue_capacity: 4096
 
 service:
   log_level: "debug"

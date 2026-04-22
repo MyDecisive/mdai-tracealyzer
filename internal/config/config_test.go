@@ -31,6 +31,9 @@ func TestLoad_DefaultsWhenNoPath(t *testing.T) {
 	assertEqual(t, 3, cfg.Emitter.MaxRetries)
 	assertDuration(t, 10*time.Second, cfg.Emitter.Timeout)
 	assertDuration(t, time.Second, cfg.Emitter.InitialBackoff)
+	assertEqual(t, 100, cfg.Emitter.BatchSize)
+	assertDuration(t, time.Second, cfg.Emitter.FlushInterval)
+	assertEqual(t, 1024, cfg.Emitter.QueueCapacity)
 	assertEqual(t, "info", cfg.Service.LogLevel)
 	assertEqual(t, "0.0.0.0:9090", cfg.Service.MetricsEndpoint)
 	assertDuration(t, 30*time.Second, cfg.Service.ShutdownGrace)
@@ -52,6 +55,9 @@ func TestLoad_YAMLOverridesDefaults(t *testing.T) {
 	assertEqual(t, "greptimedb.internal:4001", cfg.Emitter.GreptimeDBEndpoint)
 	assertEqual(t, 5, cfg.Emitter.MaxRetries)
 	assertDuration(t, 500*time.Millisecond, cfg.Emitter.InitialBackoff)
+	assertEqual(t, 250, cfg.Emitter.BatchSize)
+	assertDuration(t, 2*time.Second, cfg.Emitter.FlushInterval)
+	assertEqual(t, 4096, cfg.Emitter.QueueCapacity)
 	assertEqual(t, "debug", cfg.Service.LogLevel)
 }
 
@@ -60,6 +66,7 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	t.Setenv("TRACEALYZER_BUFFER_QUIET_PERIOD", "90s")
 	t.Setenv("TRACEALYZER_SERVICE_LOG_LEVEL", "warn")
 	t.Setenv("TRACEALYZER_EMITTER_MAX_RETRIES", "7")
+	t.Setenv("TRACEALYZER_EMITTER_QUEUE_CAPACITY", "512")
 
 	cfg, err := config.Load(filepath.Join("testdata", "valid.yaml"))
 	if err != nil {
@@ -70,6 +77,7 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	assertDuration(t, 90*time.Second, cfg.Buffer.QuietPeriod)
 	assertEqual(t, "warn", cfg.Service.LogLevel)
 	assertEqual(t, 7, cfg.Emitter.MaxRetries)
+	assertEqual(t, 512, cfg.Emitter.QueueCapacity)
 }
 
 func TestLoad_SecretsOnlyFromEnv(t *testing.T) {
@@ -180,6 +188,33 @@ service:
 		"ingestion.otlp_grpc_endpoint is required",
 		"buffer.max_ttl must be greater than buffer.quiet_period",
 		`service.log_level "trace" is invalid`,
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("missing %q in error: %s", want, msg)
+		}
+	}
+}
+
+func TestValidate_RejectsBadEmitterBatchConfig(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempYAML(t, []byte(`
+emitter:
+  batch_size: 0
+  flush_interval: "0s"
+  queue_capacity: -1
+`))
+
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+
+	msg := err.Error()
+	for _, want := range []string{
+		"emitter.batch_size must be > 0",
+		"emitter.flush_interval must be > 0",
+		"emitter.queue_capacity must be > 0",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("missing %q in error: %s", want, msg)
