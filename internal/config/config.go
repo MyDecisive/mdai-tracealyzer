@@ -169,13 +169,13 @@ func (e *Emitter) validate() []error {
 		errs = append(errs, errors.New("emitter.initial_backoff must be > 0"))
 	}
 	if e.BatchSize <= 0 {
-		errs = append(errs, "emitter.batch_size must be > 0")
+		errs = append(errs, errors.New("emitter.batch_size must be > 0"))
 	}
 	if e.FlushInterval.Duration() <= 0 {
-		errs = append(errs, "emitter.flush_interval must be > 0")
+		errs = append(errs, errors.New("emitter.flush_interval must be > 0"))
 	}
 	if e.QueueCapacity <= 0 {
-		errs = append(errs, "emitter.queue_capacity must be > 0")
+		errs = append(errs, errors.New("emitter.queue_capacity must be > 0"))
 	}
 	return errs
 }

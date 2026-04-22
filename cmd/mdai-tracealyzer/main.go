@@ -16,7 +16,6 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/app"
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
-	"github.com/mydecisive/mdai-tracealyzer/internal/emit"
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
 	"github.com/mydecisive/mdai-tracealyzer/internal/observability"
 	"github.com/prometheus/client_golang/prometheus"
