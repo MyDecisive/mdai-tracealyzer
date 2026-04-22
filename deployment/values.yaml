@@ -35,7 +35,6 @@ config:
     otlpGrpcEndpoint: "0.0.0.0:4317"
     otlpHttpEndpoint: "0.0.0.0:4318"
   buffer:
-    valkeyAddr: "valkey:6379"
     valkeyDb: 0
     quietPeriod: "60s"
     maxTtl: "10m"
@@ -53,9 +52,7 @@ config:
     shutdownGrace: "30s"
 
 secrets:
-  valkeyPassword:
-    existingSecret: ""
-    key: VALKEY_PASSWORD
+  valkeySecretName: "valkey-secret"
   greptimedbAuth:
     existingSecret: ""
     key: GREPTIMEDB_AUTH

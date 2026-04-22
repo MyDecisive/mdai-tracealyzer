@@ -19,4 +19,4 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM gcr.io/distroless/static-debian13:nonroot AS final
 WORKDIR /
 COPY --link --from=builder /mdai-tracealyzer /mdai-tracealyzer
-CMD ["/mdai-tracealyzer"]
+ENTRYPOINT ["/mdai-tracealyzer"]
