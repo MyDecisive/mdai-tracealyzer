@@ -30,7 +30,9 @@ $(TRACKING_ID_NAMESPACE_REWRITE) $(1) | $(KUBECTL) apply -f -
 endef
 
 .PHONY: build test testv test-race cover coverv coverhtml clean-coverage tidy tidy-check \
-	docker-login docker-build docker-push helm helm-package helm-publish status \
+	docker-login docker-build docker-push docker-build-local kind-load deploy-local redeploy \
+	logs metrics-forward \
+	helm helm-package helm-publish status \
 	demo-deploy-gateway demo-delete-gateway demo-port-forward \
 	demo-up demo-down demo-emit demo-agent-logs demo-gateway-logs
 
@@ -75,6 +77,31 @@ docker-build: tidy
 
 docker-push: tidy docker-login
 	docker buildx build --platform $(BUILD_PLATFORMS) -t $(DOCKER_IMAGE) . --push
+
+docker-build-local: tidy
+	docker build -t $(DOCKER_IMAGE) .
+
+kind-load: docker-build-local
+	kind load docker-image $(DOCKER_IMAGE) --name $(KIND_CLUSTER_NAME)
+
+deploy-local: kind-load
+	helm upgrade --install mdai-tracealyzer ./deployment \
+		--kube-context $(KUBECTL_CONTEXT) \
+		--namespace $(NAMESPACE) \
+		--create-namespace \
+		--set image.tag=$(DOCKER_TAG) \
+		--set image.pullPolicy=Never \
+		--set config.service.logLevel=debug
+	$(KUBECTL) rollout restart deployment/mdai-tracealyzer
+
+redeploy: kind-load
+	$(KUBECTL) rollout restart deployment/mdai-tracealyzer
+
+logs:
+	$(KUBECTL) logs -f deployment/mdai-tracealyzer
+
+metrics-forward:
+	$(KUBECTL) port-forward deployment/mdai-tracealyzer 9090:9090
 
 helm:
 	@echo "Usage: make helm-<command>"
