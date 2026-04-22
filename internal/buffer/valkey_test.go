@@ -124,7 +124,7 @@ func TestDrain_AtomicAgainstConcurrentPut(t *testing.T) {
 	}
 
 	// Seed a handful of spans so Drain has non-trivial work.
-	seed := 32
+	seed := uint32(32)
 	putSpan := func(i uint32) SpanRecord {
 		var sid [8]byte
 		sid[0] = byte((i >> 24) & 0xff)
@@ -141,7 +141,7 @@ func TestDrain_AtomicAgainstConcurrentPut(t *testing.T) {
 		}
 	}
 	for i := range seed {
-		if putErr := buf.Put(ctx, putSpan(uint32(i))); putErr != nil {
+		if putErr := buf.Put(ctx, putSpan(i)); putErr != nil {
 			t.Fatalf("seed Put %d: %v", i, putErr)
 		}
 	}
@@ -150,7 +150,7 @@ func TestDrain_AtomicAgainstConcurrentPut(t *testing.T) {
 	// We pick IDs in a disjoint range so the assertion can match on span_id.
 	var wg sync.WaitGroup
 	var putCount atomic.Uint32
-	putCount.Store(uint32(seed))
+	putCount.Store(seed)
 	stop := make(chan struct{})
 	wg.Go(func() {
 		for {
@@ -187,8 +187,8 @@ func TestDrain_AtomicAgainstConcurrentPut(t *testing.T) {
 	}
 
 	total := len(drained) + len(remaining)
-	produced := int(putCount.Load())
-	if total != produced {
+	produced := putCount.Load()
+	if total != int(produced) {
 		// Report which span IDs are missing.
 		present := make(map[string]bool, total)
 		for k := range drained {
@@ -199,7 +199,7 @@ func TestDrain_AtomicAgainstConcurrentPut(t *testing.T) {
 		}
 		missing := 0
 		for i := range produced {
-			sid := spanIDHex(putSpan(uint32(i)).SpanID)
+			sid := spanIDHex(putSpan(i).SpanID)
 			if !present[sid] {
 				missing++
 			}
