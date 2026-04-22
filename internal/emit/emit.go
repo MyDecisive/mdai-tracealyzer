@@ -21,6 +21,7 @@ var (
 
 const loggedTraceIDLimit = 10
 
+// TODO: move to topology package
 // RootMetrics is the emitter input contract for the first implementation cut.
 type RootMetrics struct {
 	RootID          string
@@ -47,7 +48,6 @@ type writer interface {
 	Close() error
 }
 
-// TODO: inject RootMetrics struct?
 type row struct {
 	Timestamp       time.Time
 	RootID          string
