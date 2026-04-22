@@ -34,9 +34,6 @@ const (
 )
 
 var configPathFlag = flag.String("config", "", "path to tracealyzer YAML config")
-var emitSampleFileFlag = flag.String("emit-sample-file", "", "temporary: read RootMetrics JSON from file and emit it to GreptimeDB")
-var emitTemplateFileFlag = flag.String("emit-template-file", "", "temporary: read one RootMetrics JSON template and emit generated rows forever")
-var emitIntervalFlag = flag.Duration("emit-interval", time.Second, "temporary: sleep interval for --emit-template-file")
 
 func main() {
 	flag.Parse()
