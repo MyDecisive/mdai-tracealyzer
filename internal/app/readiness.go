@@ -1,5 +1,3 @@
-// Package app hosts the composition root and cross-component primitives
-// shared between the binary entry point and the service's subsystems.
 package app
 
 import (

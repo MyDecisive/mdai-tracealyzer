@@ -52,15 +52,17 @@ spec:
             - name: metrics
               containerPort: {{ .Values.service.ports.metrics }}
               protocol: TCP
-          {{- if or .Values.secrets.valkeyPassword.existingSecret .Values.secrets.greptimedbAuth.existingSecret }}
           env:
-            {{- if .Values.secrets.valkeyPassword.existingSecret }}
+            - name: TRACEALYZER_BUFFER_VALKEY_ADDR
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.valkeySecretName | quote }}
+                  key: VALKEY_ENDPOINT
             - name: TRACEALYZER_BUFFER_VALKEY_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.valkeyPassword.existingSecret | quote }}
-                  key: {{ .Values.secrets.valkeyPassword.key | quote }}
-            {{- end }}
+                  name: {{ .Values.secrets.valkeySecretName | quote }}
+                  key: VALKEY_PASSWORD
             {{- if .Values.secrets.greptimedbAuth.existingSecret }}
             - name: TRACEALYZER_EMITTER_GREPTIMEDB_AUTH
               valueFrom:
@@ -68,7 +70,6 @@ spec:
                   name: {{ .Values.secrets.greptimedbAuth.existingSecret | quote }}
                   key: {{ .Values.secrets.greptimedbAuth.key | quote }}
             {{- end }}
-          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz/live

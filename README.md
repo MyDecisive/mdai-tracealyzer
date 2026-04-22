@@ -4,37 +4,95 @@ Trace topology service — computes structural metrics from OTLP traces and writ
 
 ## What it does
 
-The service ingests OTLP spans (gRPC on `4317`, HTTP on `4318`), buffers them per trace in Valkey, and — once a trace is quiet for long enough or hits its max TTL — computes topology metrics (breadth, service-hop depth, service/operation/span/error counts, root duration) and writes one row per root to the `trace_topology` table in GreptimeDB. A dashboard built on that table surfaces traces worth keeping for tail-sampling decisions.
+The v1 target: ingest OTLP spans (gRPC on `4317`, HTTP on `4318`), buffer them per trace in Valkey, and — once a trace is quiet for long enough or hits its max TTL — compute topology metrics (breadth, service-hop depth, service/operation/span/error counts, root duration) and write one row per root to the `trace_topology` table in GreptimeDB. A dashboard built on that table surfaces traces worth keeping for tail-sampling decisions.
+
+**Current build status:** OTLP ingest and the Valkey buffer are implemented. Sweep (quiet/max_ttl finalization), topology compute, and the GreptimeDB emitter are not yet wired up — spans are accepted and buffered, but no rows are written to GreptimeDB in this build.
 
 The service does not make the sampling decision itself, store full trace data, render the dashboard, or alert. Span-link handling and genuinely multi-root traces are deferred past v1.
 
 ## Running the test-stand demo
 
-The `test-stand/` tree exercises the upstream side — a Datadog agent plus a handful of demo microservices that emit realistic traces. The current `mdai-tracealyzer` binary is a packaging scaffold with health endpoints; OTLP ingestion, buffering, topology computation, and GreptimeDB emission are still represented by the requirements and design documents.
+The `test-stand/` tree exercises the upstream side — a Datadog agent plus a handful of demo microservices that emit realistic traces. The flow is: demo services → Datadog agent → OTel collector gateway (kind) → tracealyzer (kind).
 
-Today's flow exercises the Datadog receiver → OTel collector gateway path, which is the upstream contract tracealyzer will consume:
+### One-time setup
 
 ```sh
-# 1. Deploy the test gateway (OpenTelemetry Collector with the Datadog receiver)
-#    to the local kind cluster.
+# Deploy the OTel collector gateway to the kind cluster.
 make demo-deploy-gateway
 
-# 2. Port-forward the gateway so the local demo services can reach it.
-make demo-port-forward
-
-# 3. Bring up the demo services (Datadog agent + catalog/checkout/inventory/...)
-#    under docker compose.
-make demo-up
-
-# 4. Emit a scenario through the demo control API.
-make demo-emit DEMO_SCENARIO=browse
-
-# Logs:
-make demo-gateway-logs    # collector-side
-make demo-agent-logs      # Datadog agent-side
+# Build and deploy tracealyzer to the kind cluster.
+make deploy-local
 ```
 
-Tear down with `make demo-down` and `make demo-delete-gateway`.
+### Per-session
+
+Open three terminals:
+
+```sh
+# Terminal 1 — port-forward the gateway so docker-compose services can reach it.
+make demo-port-forward
+
+# Terminal 2 — port-forward tracealyzer metrics (optional, for curl localhost:9090/metrics).
+make metrics-forward
+
+# Terminal 3 — tail tracealyzer logs.
+make logs
+```
+
+Then in a fourth terminal:
+
+```sh
+# Bring up the demo services (Datadog agent + catalog/checkout/inventory/...).
+make demo-up
+
+# Emit a scenario.
+make demo-emit DEMO_SCENARIO=browse
+```
+
+### Test scenarios
+
+| Scenario | What it exercises |
+|---|---|
+| `browse` | Catalog browse — shallow trace, single service |
+| `inventory-http` | Inventory lookup over HTTP |
+| `inventory-grpc` | Inventory lookup over gRPC |
+| `checkout-http` | Full checkout flow over HTTP, no rollback |
+| `checkout-grpc` | Full checkout flow over gRPC, no rollback |
+| `checkout-rollback-grpc` | Checkout over gRPC with rollback — error path, deepest service graph |
+
+Start with `browse` to confirm basic span ingestion, then use `checkout-rollback-grpc` to stress topology computation with error spans.
+
+### Iterating on tracealyzer
+
+```sh
+# After a code change — rebuild, reload into kind, restart pod (skips helm).
+make redeploy
+
+# Full redeploy including chart changes.
+make deploy-local
+```
+
+### Logs and metrics during a run
+
+```sh
+make logs                                              # tracealyzer log tail
+make demo-gateway-logs                                 # OTel collector gateway logs
+make demo-agent-logs                                   # Datadog agent logs
+curl -s localhost:9090/metrics | grep ^topology_      # requires make metrics-forward
+```
+
+The ingest/buffer counters currently exposed are:
+
+- `topology_spans_received_total` — spans accepted by the OTLP receivers.
+- `topology_spans_malformed_total{stage="ingest"|"drain"}` — decoding failures, split by pipeline stage.
+- `topology_buffer_rejected_total{reason="overflow"|"backend_error"}` — Valkey write rejections (maxmemory pressure vs. any other backend failure).
+
+### Tear down
+
+```sh
+make demo-down             # stop docker-compose services
+make demo-delete-gateway   # remove gateway from kind
+```
 
 ## Local build
 

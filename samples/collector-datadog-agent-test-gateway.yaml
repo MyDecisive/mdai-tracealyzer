@@ -13,10 +13,8 @@ spec:
   args:
     feature-gates: receiver.datadogreceiver.Enable128BitTraceID
   env:
-    - name: LOG_SAMPLING_PCT
-      value: "100"
-    - name: TRACE_SAMPLING_PCT
-      value: "100"
+    - name: TRACEALYZER_OTLP_GRPC_ENDPOINT
+      value: "mdai-tracealyzer:4317"
   ports:
     - name: datadog
       port: 8126
@@ -28,32 +26,22 @@ spec:
         endpoint: "0.0.0.0:8126"
 
     processors:
-      probabilistic_sampler/logs:
-        mode: proportional
-        sampling_percentage: ${env:LOG_SAMPLING_PCT}
-        fail_closed: false
-        attribute_source: traceID
-        from_attribute: log_id
-
-      probabilistic_sampler/traces:
-        mode: proportional
-        sampling_percentage: ${env:TRACE_SAMPLING_PCT}
-
       batch:
         send_batch_size: 1000
         timeout: 10s
 
     exporters:
+      otlp_grpc/tracealyzer:
+        endpoint: ${env:TRACEALYZER_OTLP_GRPC_ENDPOINT}
+        tls:
+          insecure: true
+
       debug:
         verbosity: detailed
 
     service:
       pipelines:
-#        logs:
-#          receivers: [datadog]
-#          processors: [probabilistic_sampler/logs, batch]
-#          exporters: [debug]
-        traces:
+        traces/tracealyzer:
           receivers: [datadog]
-          processors: [probabilistic_sampler/traces, batch]
-          exporters: [debug]
+#          processors: [batch]
+          exporters: [otlp_grpc/tracealyzer,debug]

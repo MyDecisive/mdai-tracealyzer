@@ -38,7 +38,7 @@ func main() {
 			"scenario":       meta.Scenario,
 			"warehouse":      "east",
 			"status":         "reserved",
-			"reservation_id": "reservation-" + meta.RequestID[len(meta.RequestID)-6:],
+			"reservation_id": common.ReservationID(meta.RequestID),
 			"reserved":       true,
 			"payload":        payload,
 		}, nil

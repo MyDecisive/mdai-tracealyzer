@@ -1,6 +1,3 @@
-// Package config loads the tracealyzer YAML configuration and applies
-// environment-variable overrides. Environment variables use the
-// TRACEALYZER_ prefix.
 package config
 
 import (
@@ -108,72 +105,68 @@ func Load(path string) (*Config, error) {
 
 // Validate checks all required fields and rejects unusable values.
 func (c *Config) Validate() error {
-	var errs []string
+	var errs []error
 	errs = append(errs, c.Ingestion.validate()...)
 	errs = append(errs, c.Buffer.validate()...)
 	errs = append(errs, c.Emitter.validate()...)
 	errs = append(errs, c.Service.validate()...)
-
-	if len(errs) == 0 {
-		return nil
-	}
-	return errors.New(strings.Join(errs, "; "))
+	return errors.Join(errs...)
 }
 
-func (i *Ingestion) validate() []string {
-	var errs []string
+func (i *Ingestion) validate() []error {
+	var errs []error
 	if i.OTLPGRPCEndpoint == "" {
-		errs = append(errs, "ingestion.otlp_grpc_endpoint is required")
+		errs = append(errs, errors.New("ingestion.otlp_grpc_endpoint is required"))
 	}
 	if i.OTLPHTTPEndpoint == "" {
-		errs = append(errs, "ingestion.otlp_http_endpoint is required")
+		errs = append(errs, errors.New("ingestion.otlp_http_endpoint is required"))
 	}
 	return errs
 }
 
-func (b *Buffer) validate() []string {
-	var errs []string
+func (b *Buffer) validate() []error {
+	var errs []error
 	if b.ValkeyAddr == "" {
-		errs = append(errs, "buffer.valkey_addr is required")
+		errs = append(errs, errors.New("buffer.valkey_addr is required"))
 	}
 	if b.ValkeyDB < 0 {
-		errs = append(errs, "buffer.valkey_db must be >= 0")
+		errs = append(errs, errors.New("buffer.valkey_db must be >= 0"))
 	}
 	if b.QuietPeriod.Duration() <= 0 {
-		errs = append(errs, "buffer.quiet_period must be > 0")
+		errs = append(errs, errors.New("buffer.quiet_period must be > 0"))
 	}
 	if b.MaxTTL.Duration() <= 0 {
-		errs = append(errs, "buffer.max_ttl must be > 0")
+		errs = append(errs, errors.New("buffer.max_ttl must be > 0"))
 	}
 	if b.SweepInterval.Duration() <= 0 {
-		errs = append(errs, "buffer.sweep_interval must be > 0")
+		errs = append(errs, errors.New("buffer.sweep_interval must be > 0"))
 	}
 	if b.MaxTTL.Duration() > 0 && b.QuietPeriod.Duration() > 0 &&
 		b.MaxTTL.Duration() <= b.QuietPeriod.Duration() {
-		errs = append(errs, "buffer.max_ttl must be greater than buffer.quiet_period")
+		errs = append(errs, errors.New("buffer.max_ttl must be greater than buffer.quiet_period"))
 	}
 	return errs
 }
 
-func (e *Emitter) validate() []string {
-	var errs []string
+func (e *Emitter) validate() []error {
+	var errs []error
 	if e.GreptimeDBEndpoint == "" {
-		errs = append(errs, "emitter.greptimedb_endpoint is required")
+		errs = append(errs, errors.New("emitter.greptimedb_endpoint is required"))
 	}
 	if e.GreptimeDBDatabase == "" {
-		errs = append(errs, "emitter.greptimedb_database is required")
+		errs = append(errs, errors.New("emitter.greptimedb_database is required"))
 	}
 	if e.TableName == "" {
-		errs = append(errs, "emitter.table_name is required")
+		errs = append(errs, errors.New("emitter.table_name is required"))
 	}
 	if e.Timeout.Duration() <= 0 {
-		errs = append(errs, "emitter.timeout must be > 0")
+		errs = append(errs, errors.New("emitter.timeout must be > 0"))
 	}
 	if e.MaxRetries < 0 {
-		errs = append(errs, "emitter.max_retries must be >= 0")
+		errs = append(errs, errors.New("emitter.max_retries must be >= 0"))
 	}
 	if e.InitialBackoff.Duration() <= 0 {
-		errs = append(errs, "emitter.initial_backoff must be > 0")
+		errs = append(errs, errors.New("emitter.initial_backoff must be > 0"))
 	}
 	if e.BatchSize <= 0 {
 		errs = append(errs, "emitter.batch_size must be > 0")
@@ -187,21 +180,21 @@ func (e *Emitter) validate() []string {
 	return errs
 }
 
-func (s *Service) validate() []string {
-	var errs []string
+func (s *Service) validate() []error {
+	var errs []error
 	switch strings.ToLower(s.LogLevel) {
 	case "debug", "info", "warn", "error":
 	default:
-		errs = append(errs, fmt.Sprintf(
+		errs = append(errs, fmt.Errorf(
 			"service.log_level %q is invalid (expected debug|info|warn|error)",
 			s.LogLevel,
 		))
 	}
 	if s.MetricsEndpoint == "" {
-		errs = append(errs, "service.metrics_endpoint is required")
+		errs = append(errs, errors.New("service.metrics_endpoint is required"))
 	}
 	if s.ShutdownGrace.Duration() <= 0 {
-		errs = append(errs, "service.shutdown_grace must be > 0")
+		errs = append(errs, errors.New("service.shutdown_grace must be > 0"))
 	}
 	return errs
 }

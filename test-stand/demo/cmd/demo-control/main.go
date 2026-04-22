@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/vika/global_ratio_mode/test-stand/demo/internal/common"
 )
@@ -21,11 +22,9 @@ type emitRequest struct {
 
 func main() {
 	service := "demo-control"
-	stopTracer := common.StartTracer(service)
-	defer stopTracer()
 
 	logger := common.NewLogger(service)
-	client := common.NewTracedHTTPClient(service)
+	client := &http.Client{Timeout: 5 * time.Second}
 	gatewayURL := common.Getenv("GATEWAY_URL", "http://gateway-api:8080")
 
 	scenarios := map[string]emitRoute{

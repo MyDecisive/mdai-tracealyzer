@@ -10,7 +10,6 @@ data:
       otlp_grpc_endpoint: {{ .Values.config.ingestion.otlpGrpcEndpoint | quote }}
       otlp_http_endpoint: {{ .Values.config.ingestion.otlpHttpEndpoint | quote }}
     buffer:
-      valkey_addr: {{ .Values.config.buffer.valkeyAddr | quote }}
       valkey_db: {{ .Values.config.buffer.valkeyDb }}
       quiet_period: {{ .Values.config.buffer.quietPeriod | quote }}
       max_ttl: {{ .Values.config.buffer.maxTtl | quote }}

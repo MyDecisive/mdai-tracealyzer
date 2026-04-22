@@ -60,7 +60,7 @@ func (s *inventoryServer) ReserveItems(ctx context.Context, req *pb.InventoryReq
 		Scenario:      scenario,
 		Success:       true,
 		Status:        "reserved",
-		ReservationId: "reservation-" + requestID[len(requestID)-6:],
+		ReservationId: common.ReservationID(requestID),
 		Warehouse:     "east",
 		Available:     41,
 	}
