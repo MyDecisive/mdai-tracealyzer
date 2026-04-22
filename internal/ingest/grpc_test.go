@@ -58,7 +58,7 @@ func TestGRPCServer_Export_StoresNormalizedRecords(t *testing.T) {
 	server := ingest.NewGRPCServer(rec, metrics, zap.NewNop())
 
 	client, cleanup := dialGRPC(t, server)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	req := &coltracepb.ExportTraceServiceRequest{
 		ResourceSpans: []*tracepb.ResourceSpans{
@@ -97,7 +97,7 @@ func TestGRPCServer_Export_AcceptsGzipCompression(t *testing.T) {
 	server := ingest.NewGRPCServer(rec, metrics, zap.NewNop())
 
 	client, cleanup := dialGRPC(t, server)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	req := &coltracepb.ExportTraceServiceRequest{
 		ResourceSpans: []*tracepb.ResourceSpans{
@@ -134,7 +134,7 @@ func TestGRPCServer_Export_ReportsRejectedSpans(t *testing.T) {
 	server := ingest.NewGRPCServer(rec, metrics, zap.NewNop())
 
 	client, cleanup := dialGRPC(t, server)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	req := &coltracepb.ExportTraceServiceRequest{
 		ResourceSpans: []*tracepb.ResourceSpans{

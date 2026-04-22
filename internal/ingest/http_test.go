@@ -26,7 +26,7 @@ func TestHTTPServer_PostTraces_StoresRecords(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(reg), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	body := mustMarshal(t, &coltracepb.ExportTraceServiceRequest{
 		ResourceSpans: []*tracepb.ResourceSpans{
@@ -66,7 +66,7 @@ func TestHTTPServer_RejectsNonPOST(t *testing.T) {
 	rec := &fakeRecorder{}
 	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
 	if err != nil {
@@ -91,7 +91,7 @@ func TestHTTPServer_RejectsNonProtobufContentType(t *testing.T) {
 	rec := &fakeRecorder{}
 	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	resp := doPost(t, url, "application/json", []byte(`{"resourceSpans":[]}`))
 	defer func() { _ = resp.Body.Close() }()
@@ -106,7 +106,7 @@ func TestHTTPServer_AcceptsProtobufContentTypeWithParams(t *testing.T) {
 	rec := &fakeRecorder{}
 	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	body := mustMarshal(t, &coltracepb.ExportTraceServiceRequest{
 		ResourceSpans: []*tracepb.ResourceSpans{
@@ -131,7 +131,7 @@ func TestHTTPServer_MalformedProtobufReturns400(t *testing.T) {
 	rec := &fakeRecorder{}
 	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	resp := doPost(t, url, "application/x-protobuf", []byte{0xff, 0xff, 0xff, 0xff})
 	defer func() { _ = resp.Body.Close() }()
@@ -154,7 +154,7 @@ func TestHTTPServer_ReportsRejectedSpans(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(reg), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	body := mustMarshal(t, &coltracepb.ExportTraceServiceRequest{
 		ResourceSpans: []*tracepb.ResourceSpans{
@@ -203,7 +203,7 @@ func TestHTTPServer_ReportsClassifiedErrorMessage(t *testing.T) {
 			rec := &fakeRecorder{rejectFn: func(buffer.SpanRecord) error { return tc.putErr }}
 			server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 			url, cleanup := startHTTP(t, server)
-			defer cleanup()
+			t.Cleanup(cleanup)
 
 			body := mustMarshal(t, &coltracepb.ExportTraceServiceRequest{
 				ResourceSpans: []*tracepb.ResourceSpans{
@@ -234,7 +234,7 @@ func TestHTTPServer_CountsMalformedSpansAsReceived(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(reg), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	bad := rootSpan([16]byte{}, rootSpanID, "bad", tracepb.Span_SPAN_KIND_SERVER, tracepb.Status_STATUS_CODE_OK)
 	good := rootSpan(traceIDAllBytes, childSpanID, "good", tracepb.Span_SPAN_KIND_SERVER, tracepb.Status_STATUS_CODE_OK)
