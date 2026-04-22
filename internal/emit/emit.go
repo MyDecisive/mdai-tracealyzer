@@ -21,8 +21,8 @@ var (
 
 const loggedTraceIDLimit = 10
 
-// TODO: move to topology package
 // RootMetrics is the emitter input contract for the first implementation cut.
+// TODO: move to topology package.
 type RootMetrics struct {
 	RootID          string
 	TraceID         string
@@ -93,6 +93,8 @@ type emitter struct {
 }
 
 // New constructs the production emitter using the GreptimeDB SDK client.
+//
+//nolint:ireturn // Returning the Emitter interface keeps callers decoupled from the concrete async implementation.
 func New(cfg config.Emitter, logger *zap.Logger, reg prometheus.Registerer) (Emitter, error) {
 	if logger == nil {
 		logger = zap.NewNop()

@@ -47,6 +47,10 @@ func (c *fakeSDKClient) Write(ctx context.Context, tables ...*table.Table) (*gpb
 	return c.nextResponse(), nil
 }
 
+func (_ *fakeSDKClient) Close() error {
+	return nil
+}
+
 func (c *fakeSDKClient) nextResponse() *gpb.GreptimeResponse {
 	if len(c.resps) == 0 {
 		return &gpb.GreptimeResponse{}
@@ -54,10 +58,6 @@ func (c *fakeSDKClient) nextResponse() *gpb.GreptimeResponse {
 	resp := c.resps[0]
 	c.resps = c.resps[1:]
 	return resp
-}
-
-func (c *fakeSDKClient) Close() error {
-	return nil
 }
 
 func TestGreptimeWriterAlwaysUsesAutoCreateTable(t *testing.T) {
@@ -144,29 +144,30 @@ func TestBuildTableMapsSchema(t *testing.T) {
 		t.Fatalf("ToInsertRequest: %v", err)
 	}
 
-	if req.TableName != "trace_root_topology" {
-		t.Fatalf("want table trace_root_topology, got %q", req.TableName)
+	if req.GetTableName() != "trace_root_topology" {
+		t.Fatalf("want table trace_root_topology, got %q", req.GetTableName())
 	}
-	if got := len(req.Rows.Schema); got != 12 {
+	schema := req.GetRows().GetSchema()
+	if got := len(schema); got != 12 {
 		t.Fatalf("want 12 columns, got %d", got)
 	}
 
-	checkColumn(t, req.Rows.Schema[0], "root_id", gpb.SemanticType_TAG, gpb.ColumnDataType_STRING)
-	checkColumn(t, req.Rows.Schema[1], "trace_id", gpb.SemanticType_TAG, gpb.ColumnDataType_STRING)
-	checkColumn(t, req.Rows.Schema[2], "root_service", gpb.SemanticType_FIELD, gpb.ColumnDataType_STRING)
-	checkColumn(t, req.Rows.Schema[3], "root_operation", gpb.SemanticType_FIELD, gpb.ColumnDataType_STRING)
-	checkColumn(t, req.Rows.Schema[11], "timestamp", gpb.SemanticType_TIMESTAMP, gpb.ColumnDataType_TIMESTAMP_NANOSECOND)
+	checkColumn(t, schema[0], "root_id", gpb.SemanticType_TAG, gpb.ColumnDataType_STRING)
+	checkColumn(t, schema[1], "trace_id", gpb.SemanticType_TAG, gpb.ColumnDataType_STRING)
+	checkColumn(t, schema[2], "root_service", gpb.SemanticType_FIELD, gpb.ColumnDataType_STRING)
+	checkColumn(t, schema[3], "root_operation", gpb.SemanticType_FIELD, gpb.ColumnDataType_STRING)
+	checkColumn(t, schema[11], "timestamp", gpb.SemanticType_TIMESTAMP, gpb.ColumnDataType_TIMESTAMP_NANOSECOND)
 }
 
 func checkColumn(t *testing.T, col *gpb.ColumnSchema, name string, semantic gpb.SemanticType, typ gpb.ColumnDataType) {
 	t.Helper()
-	if col.ColumnName != name {
-		t.Fatalf("want column %q, got %q", name, col.ColumnName)
+	if col.GetColumnName() != name {
+		t.Fatalf("want column %q, got %q", name, col.GetColumnName())
 	}
-	if col.SemanticType != semantic {
-		t.Fatalf("column %q semantic type = %v, want %v", name, col.SemanticType, semantic)
+	if col.GetSemanticType() != semantic {
+		t.Fatalf("column %q semantic type = %v, want %v", name, col.GetSemanticType(), semantic)
 	}
-	if col.Datatype != typ {
-		t.Fatalf("column %q datatype = %v, want %v", name, col.Datatype, typ)
+	if col.GetDatatype() != typ {
+		t.Fatalf("column %q datatype = %v, want %v", name, col.GetDatatype(), typ)
 	}
 }

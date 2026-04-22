@@ -9,7 +9,7 @@ import (
 
 	gpb "github.com/GreptimeTeam/greptime-proto/go/greptime/v1"
 	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
-	ingesterContext "github.com/GreptimeTeam/greptimedb-ingester-go/context"
+	gtcontext "github.com/GreptimeTeam/greptimedb-ingester-go/context"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table/types"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
@@ -25,6 +25,7 @@ type greptimeWriter struct {
 	client sdkClient
 }
 
+//nolint:ireturn // The writer interface is the package's test seam around the GreptimeDB SDK.
 func newGreptimeWriter(cfg config.Emitter, _ *zap.Logger) (writer, error) {
 	client, err := newGreptimeClient(cfg)
 	if err != nil {
@@ -33,7 +34,7 @@ func newGreptimeWriter(cfg config.Emitter, _ *zap.Logger) (writer, error) {
 	return &greptimeWriter{client: client}, nil
 }
 
-func newGreptimeClient(cfg config.Emitter) (sdkClient, error) {
+func newGreptimeClient(cfg config.Emitter) (*greptime.Client, error) {
 	host, port, err := splitEndpoint(cfg.GreptimeDBEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("parse greptimedb endpoint: %w", err)
@@ -75,41 +76,20 @@ func buildTable(batch writeBatch) (*table.Table, error) {
 		return nil, fmt.Errorf("create table %q: %w", batch.Table, err)
 	}
 
-	if err := tbl.AddTagColumn("root_id", types.STRING); err != nil {
-		return nil, err
+	for _, col := range tagColumns() {
+		if err := tbl.AddTagColumn(col.name, col.typ); err != nil {
+			return nil, err
+		}
 	}
-	if err := tbl.AddTagColumn("trace_id", types.STRING); err != nil {
-		return nil, err
+	for _, col := range fieldColumns() {
+		if err := tbl.AddFieldColumn(col.name, col.typ); err != nil {
+			return nil, err
+		}
 	}
-	if err := tbl.AddFieldColumn("root_service", types.STRING); err != nil {
-		return nil, err
-	}
-	if err := tbl.AddFieldColumn("root_operation", types.STRING); err != nil {
-		return nil, err
-	}
-	if err := tbl.AddFieldColumn("breadth", types.INT32); err != nil {
-		return nil, err
-	}
-	if err := tbl.AddFieldColumn("service_hop_depth", types.INT32); err != nil {
-		return nil, err
-	}
-	if err := tbl.AddFieldColumn("service_count", types.INT32); err != nil {
-		return nil, err
-	}
-	if err := tbl.AddFieldColumn("operation_count", types.INT32); err != nil {
-		return nil, err
-	}
-	if err := tbl.AddFieldColumn("span_count", types.INT32); err != nil {
-		return nil, err
-	}
-	if err := tbl.AddFieldColumn("error_count", types.INT32); err != nil {
-		return nil, err
-	}
-	if err := tbl.AddFieldColumn("root_duration_ns", types.INT64); err != nil {
-		return nil, err
-	}
-	if err := tbl.AddTimestampColumn("timestamp", types.TIMESTAMP_NANOSECOND); err != nil {
-		return nil, err
+	for _, col := range timestampColumns() {
+		if err := tbl.AddTimestampColumn(col.name, col.typ); err != nil {
+			return nil, err
+		}
 	}
 
 	for _, r := range batch.Rows {
@@ -134,8 +114,40 @@ func buildTable(batch writeBatch) (*table.Table, error) {
 	return tbl, nil
 }
 
+type columnDef struct {
+	name string
+	typ  types.ColumnType
+}
+
+func tagColumns() []columnDef {
+	return []columnDef{
+		{name: "root_id", typ: types.STRING},
+		{name: "trace_id", typ: types.STRING},
+	}
+}
+
+func fieldColumns() []columnDef {
+	return []columnDef{
+		{name: "root_service", typ: types.STRING},
+		{name: "root_operation", typ: types.STRING},
+		{name: "breadth", typ: types.INT32},
+		{name: "service_hop_depth", typ: types.INT32},
+		{name: "service_count", typ: types.INT32},
+		{name: "operation_count", typ: types.INT32},
+		{name: "span_count", typ: types.INT32},
+		{name: "error_count", typ: types.INT32},
+		{name: "root_duration_ns", typ: types.INT64},
+	}
+}
+
+func timestampColumns() []columnDef {
+	return []columnDef{
+		{name: "timestamp", typ: types.TIMESTAMP_NANOSECOND},
+	}
+}
+
 func withAutoCreateHint(ctx context.Context, enabled bool) context.Context {
-	return ingesterContext.New(ctx, ingesterContext.WithHint([]*ingesterContext.Hint{
+	return gtcontext.New(ctx, gtcontext.WithHint([]*gtcontext.Hint{
 		{
 			Key:   "auto_create_table",
 			Value: strconv.FormatBool(enabled),
@@ -155,7 +167,7 @@ func splitEndpoint(endpoint string) (string, int, error) {
 	return host, port, nil
 }
 
-func parseAuth(raw string) (string, string) {
+func parseAuth(raw string) (username string, password string) {
 	if raw == "" {
 		return "", ""
 	}
