@@ -1,0 +1,41 @@
+[
+  {
+    "RootID": "gateway-api::GET /checkout/:id",
+    "TraceID": "8f0c53fa33f945f7b66ab312d19ec101",
+    "RootService": "gateway-api",
+    "RootOperation": "GET /checkout/:id",
+    "Breadth": 3,
+    "ServiceHopDepth": 4,
+    "ServiceCount": 5,
+    "OperationCount": 8,
+    "SpanCount": 22,
+    "ErrorCount": 0,
+    "RootDurationNS": 184000000
+  },
+  {
+    "RootID": "checkout-api::POST /checkout",
+    "TraceID": "1e9d8b7c6a5f4012aa9bf9cf18f4a201",
+    "RootService": "checkout-api",
+    "RootOperation": "POST /checkout",
+    "Breadth": 4,
+    "ServiceHopDepth": 5,
+    "ServiceCount": 6,
+    "OperationCount": 10,
+    "SpanCount": 31,
+    "ErrorCount": 1,
+    "RootDurationNS": 267000000
+  },
+  {
+    "RootID": "catalog-api::GET /catalog/:sku",
+    "TraceID": "b7d55af0af5444bca0af03de3cb58c01",
+    "RootService": "catalog-api",
+    "RootOperation": "GET /catalog/:sku",
+    "Breadth": 2,
+    "ServiceHopDepth": 3,
+    "ServiceCount": 3,
+    "OperationCount": 5,
+    "SpanCount": 12,
+    "ErrorCount": 0,
+    "RootDurationNS": 91000000
+  }
+]

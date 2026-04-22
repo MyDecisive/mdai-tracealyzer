@@ -1,0 +1,13 @@
+{
+  "RootID": "template::will-be-overwritten",
+  "TraceID": "00000000000000000000000000000000",
+  "RootService": "template",
+  "RootOperation": "will-be-overwritten",
+  "Breadth": 4,
+  "ServiceHopDepth": 5,
+  "ServiceCount": 6,
+  "OperationCount": 11,
+  "SpanCount": 34,
+  "ErrorCount": 1,
+  "RootDurationNS": 287000000
+}
