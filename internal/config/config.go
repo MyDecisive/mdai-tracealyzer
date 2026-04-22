@@ -22,6 +22,9 @@ const (
 	defaultEmitterTimeout = 10 * time.Second
 	defaultMaxRetries     = 3
 	defaultInitialBackoff = time.Second
+	defaultBatchSize      = 100
+	defaultFlushInterval  = time.Second
+	defaultQueueCapacity  = 1024
 	defaultShutdownGrace  = 30 * time.Second
 )
 
@@ -58,6 +61,9 @@ type Emitter struct {
 	Timeout            Duration `envconfig:"TIMEOUT"             yaml:"timeout"`
 	MaxRetries         int      `envconfig:"MAX_RETRIES"         yaml:"max_retries"`
 	InitialBackoff     Duration `envconfig:"INITIAL_BACKOFF"     yaml:"initial_backoff"`
+	BatchSize          int      `envconfig:"BATCH_SIZE"          yaml:"batch_size"`
+	FlushInterval      Duration `envconfig:"FLUSH_INTERVAL"      yaml:"flush_interval"`
+	QueueCapacity      int      `envconfig:"QUEUE_CAPACITY"      yaml:"queue_capacity"`
 }
 
 // Service configures cross-cutting runtime settings.
@@ -162,6 +168,15 @@ func (e *Emitter) validate() []error {
 	if e.InitialBackoff.Duration() <= 0 {
 		errs = append(errs, errors.New("emitter.initial_backoff must be > 0"))
 	}
+	if e.BatchSize <= 0 {
+		errs = append(errs, errors.New("emitter.batch_size must be > 0"))
+	}
+	if e.FlushInterval.Duration() <= 0 {
+		errs = append(errs, errors.New("emitter.flush_interval must be > 0"))
+	}
+	if e.QueueCapacity <= 0 {
+		errs = append(errs, errors.New("emitter.queue_capacity must be > 0"))
+	}
 	return errs
 }
 
@@ -202,10 +217,13 @@ func defaults() Config {
 			GreptimeDBEndpoint: "greptimedb:4001",
 			GreptimeDBDatabase: "public",
 			GreptimeDBAuth:     "",
-			TableName:          "trace_topology",
+			TableName:          "trace_root_topology",
 			Timeout:            Duration(defaultEmitterTimeout),
 			MaxRetries:         defaultMaxRetries,
 			InitialBackoff:     Duration(defaultInitialBackoff),
+			BatchSize:          defaultBatchSize,
+			FlushInterval:      Duration(defaultFlushInterval),
+			QueueCapacity:      defaultQueueCapacity,
 		},
 		Service: Service{
 			LogLevel:        "info",

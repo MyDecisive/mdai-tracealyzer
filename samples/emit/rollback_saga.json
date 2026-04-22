@@ -1,0 +1,41 @@
+[
+  {
+    "RootID": "checkout-api::POST /checkout",
+    "TraceID": "f4e0d2b30e9b4db08f6220b8bb00ab01",
+    "RootService": "checkout-api",
+    "RootOperation": "POST /checkout",
+    "Breadth": 5,
+    "ServiceHopDepth": 6,
+    "ServiceCount": 7,
+    "OperationCount": 13,
+    "SpanCount": 48,
+    "ErrorCount": 4,
+    "RootDurationNS": 643000000
+  },
+  {
+    "RootID": "payments-api::POST /payments/authorize",
+    "TraceID": "0bc38441d9f7460f90d26fbb5b7fca01",
+    "RootService": "payments-api",
+    "RootOperation": "POST /payments/authorize",
+    "Breadth": 3,
+    "ServiceHopDepth": 4,
+    "ServiceCount": 4,
+    "OperationCount": 7,
+    "SpanCount": 19,
+    "ErrorCount": 2,
+    "RootDurationNS": 221000000
+  },
+  {
+    "RootID": "inventory-grpc-service::Inventory/ReserveItems",
+    "TraceID": "2f236dc84d3e44af867bfe471e95bd01",
+    "RootService": "inventory-grpc-service",
+    "RootOperation": "Inventory/ReserveItems",
+    "Breadth": 4,
+    "ServiceHopDepth": 5,
+    "ServiceCount": 5,
+    "OperationCount": 9,
+    "SpanCount": 27,
+    "ErrorCount": 1,
+    "RootDurationNS": 317000000
+  }
+]

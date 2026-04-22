@@ -4,7 +4,7 @@ Trace topology service — computes structural metrics from OTLP traces and writ
 
 ## What it does
 
-The v1 target: ingest OTLP spans (gRPC on `4317`, HTTP on `4318`), buffer them per trace in Valkey, and — once a trace is quiet for long enough or hits its max TTL — compute topology metrics (breadth, service-hop depth, service/operation/span/error counts, root duration) and write one row per root to the `trace_topology` table in GreptimeDB. A dashboard built on that table surfaces traces worth keeping for tail-sampling decisions.
+The v1 target: ingest OTLP spans (gRPC on `4317`, HTTP on `4318`), buffer them per trace in Valkey, and — once a trace is quiet for long enough or hits its max TTL — compute topology metrics (breadth, service-hop depth, service/operation/span/error counts, root duration) and write one row per root to the `trace_root_topology` table in GreptimeDB. A dashboard built on that table surfaces traces worth keeping for tail-sampling decisions.
 
 **Current build status:** OTLP ingest and the Valkey buffer are implemented. Sweep (quiet/max_ttl finalization), topology compute, and the GreptimeDB emitter are not yet wired up — spans are accepted and buffered, but no rows are written to GreptimeDB in this build.
 
