@@ -16,8 +16,10 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/app"
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
+	"github.com/mydecisive/mdai-tracealyzer/internal/emit"
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
 	"github.com/mydecisive/mdai-tracealyzer/internal/observability"
+	"github.com/mydecisive/mdai-tracealyzer/internal/sweep"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -65,10 +67,14 @@ func mainExit(configPath string) int {
 }
 
 func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
+	ctx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
 	ready := app.NewReadiness("otlp_grpc", "otlp_http", "buffer")
 	registry := observability.NewRegistry()
 	ingestMetrics := ingest.NewMetrics(registry)
 	bufferMetrics := buffer.NewMetrics(registry, ingestMetrics.MalformedDrainCounter())
+	sweepMetrics := sweep.NewMetrics(registry)
 
 	valkeyBuffer, err := buffer.NewValkeyBuffer(buffer.ValkeyOptions{
 		Addr:     cfg.Buffer.ValkeyAddr,
@@ -82,6 +88,31 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		return fmt.Errorf("valkey buffer: %w", err)
 	}
 	defer valkeyBuffer.Close()
+
+	emitter, err := emit.New(cfg.Emitter, logger, registry)
+	if err != nil {
+		return fmt.Errorf("emitter: %w", err)
+	}
+	// Safety net for early-return paths. The main shutdown path closes the
+	// emitter explicitly under shutdownCtx; a subsequent Close on the same
+	// emitter blocks on the already-closed done channel and is idempotent.
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx), cfg.Service.ShutdownGrace.Duration(),
+		)
+		defer cancel()
+		_ = emitter.Close(closeCtx)
+	}()
+
+	sweeper, err := sweep.New(valkeyBuffer, stubComputer{}, emitter, sweep.Config{
+		QuietPeriod:    cfg.Buffer.QuietPeriod.Duration(),
+		MaxTTL:         cfg.Buffer.MaxTTL.Duration(),
+		Interval:       cfg.Buffer.SweepInterval.Duration(),
+		WorkerPoolSize: cfg.Buffer.SweepWorkerPoolSize,
+	}, sweepMetrics, logger)
+	if err != nil {
+		return fmt.Errorf("sweeper: %w", err)
+	}
 
 	listeners, err := openListeners(ctx, cfg)
 	if err != nil {
@@ -101,6 +132,7 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		zap.Duration("shutdown_grace", cfg.Service.ShutdownGrace.Duration()),
 		zap.Strings("readiness_pending", ready.Pending()),
 	)
+	logger.Warn("sweeper running with stub computer; traces drain from Valkey without emitting topology rows until a real Computer is wired")
 
 	var probeWG sync.WaitGroup
 	probeWG.Go(func() {
@@ -109,6 +141,13 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		}
 		ready.Mark("buffer")
 		logger.Info("valkey reachable; buffer ready")
+	})
+
+	var sweeperWG sync.WaitGroup
+	sweeperWG.Go(func() {
+		if err := sweeper.Run(ctx); err != nil {
+			logger.Error("sweeper exited", zap.Error(err))
+		}
 	})
 
 	errCh := make(chan serveResult, numServers)
@@ -132,12 +171,24 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		}
 	}
 
+	// Propagate shutdown to the sweeper goroutine when a server crash — not a
+	// signal — triggered the wind-down; SIGTERM already cancelled ctx.
+	cancelRun()
+
 	shutdownCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(ctx), cfg.Service.ShutdownGrace.Duration(),
 	)
 	defer cancel()
 
 	shutdownErr := gracefulShutdown(shutdownCtx, errCh, remaining, &probeWG, logger, adminServer, grpcServer, httpServer)
+
+	// Wait for the sweeper's in-flight tick before closing the emitter, so a
+	// late Emit does not land after the queue has begun draining.
+	sweeperWG.Wait()
+	if err := emitter.Close(shutdownCtx); err != nil {
+		logger.Warn("close emitter", zap.Error(err))
+	}
+
 	if serveErr != nil {
 		return serveErr
 	}
@@ -146,6 +197,15 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	}
 	logger.Info("service stopped")
 	return nil
+}
+
+// stubComputer reports every trace as root-less so the sweeper's Scan →
+// Drain → Compute → Emit loop exercises end-to-end wiring without emitting
+// topology rows. Replace once a real Computer implementation exists.
+type stubComputer struct{}
+
+func (stubComputer) Compute(_ [16]byte, _ string, _ map[string]buffer.SpanRecord) (emit.RootMetrics, error) {
+	return emit.RootMetrics{}, sweep.ErrNoRoot
 }
 
 func buildAdminMux(registry *prometheus.Registry, ready *app.Readiness) *http.ServeMux {

@@ -94,7 +94,12 @@ func (s *Sweeper) Run(ctx context.Context) error {
 	}
 }
 
-func (s *Sweeper) tick(ctx context.Context) {
+func (s *Sweeper) tick(parent context.Context) {
+	// Run the tick to completion even if parent cancels mid-flight: once Drain
+	// removes state from Valkey, the row must reach Emit. Run() still exits
+	// promptly because it only re-selects on ctx.Done after tick returns.
+	ctx := context.WithoutCancel(parent)
+
 	now := s.now()
 	quietCutoff := now.Add(-s.cfg.QuietPeriod)
 	ttlCutoff := now.Add(-s.cfg.MaxTTL)

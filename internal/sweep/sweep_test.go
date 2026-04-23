@@ -36,7 +36,10 @@ func (*fakeBuffer) Put(context.Context, buffer.SpanRecord) error {
 	return errors.New("fakeBuffer.Put: not expected")
 }
 
-func (f *fakeBuffer) Scan(_ context.Context, quietCutoff, ttlCutoff time.Time) ([]buffer.Finalizable, error) {
+func (f *fakeBuffer) Scan(ctx context.Context, quietCutoff, ttlCutoff time.Time) ([]buffer.Finalizable, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.mu.Lock()
 	f.scanCalls++
 	f.scanCutoffs = append(f.scanCutoffs, scanArgs{quietCutoff, ttlCutoff})
@@ -47,7 +50,10 @@ func (f *fakeBuffer) Scan(_ context.Context, quietCutoff, ttlCutoff time.Time) (
 	return f.scanResult, nil
 }
 
-func (f *fakeBuffer) Drain(_ context.Context, id [16]byte) (map[string]buffer.SpanRecord, error) {
+func (f *fakeBuffer) Drain(ctx context.Context, id [16]byte) (map[string]buffer.SpanRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.mu.Lock()
 	f.drainCalls = append(f.drainCalls, id)
 	f.mu.Unlock()
@@ -474,6 +480,53 @@ func (g *gatingComputer) Compute(_ [16]byte, _ string, _ map[string]buffer.SpanR
 	}
 	<-g.gate
 	return emit.RootMetrics{}, nil
+}
+
+// TestSweeper_TickRunsToCompletionOnCancel verifies that a parent-ctx cancel
+// does not abort work already in flight: once a tick starts, Scan and Drain
+// must run against a ctx that ignores the cancel, so a post-Drain row always
+// reaches Emit. The outer Run loop still exits on cancel because it re-selects
+// on ctx.Done only after the tick returns.
+func TestSweeper_TickRunsToCompletionOnCancel(t *testing.T) {
+	t.Parallel()
+
+	a := traceID(1)
+	buf := &fakeBuffer{
+		scanResult: []buffer.Finalizable{{TraceID: a, Trigger: buffer.TriggerQuiet}},
+		drainSpans: map[[16]byte]map[string]buffer.SpanRecord{
+			a: {"span-a": {TraceID: a}},
+		},
+	}
+	comp := &fakeComputer{
+		results: map[[16]byte]computeResult{
+			a: {rm: emit.RootMetrics{TraceID: "a"}},
+		},
+	}
+	em := &fakeEmitter{}
+	s, m := newSweeperForTest(t, buf, comp, em)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.tick(ctx)
+
+	if buf.scanCalls != 1 {
+		t.Fatalf("Scan calls: want 1, got %d", buf.scanCalls)
+	}
+	if len(buf.drainCalls) != 1 {
+		t.Fatalf("Drain calls: want 1, got %d", len(buf.drainCalls))
+	}
+	if em.callCount() != 1 {
+		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
+	}
+	if got := testutil.ToFloat64(m.finalized); got != 1 {
+		t.Fatalf("finalized: want 1, got %v", got)
+	}
+	if got := testutil.ToFloat64(m.sweepsOK); got != 1 {
+		t.Fatalf("sweeps{ok}: want 1, got %v", got)
+	}
+	if got := testutil.ToFloat64(m.drainErrors); got != 0 {
+		t.Fatalf("drain_errors: want 0, got %v", got)
+	}
 }
 
 func TestSweeper_Run_ReturnsOnCtxCancel(t *testing.T) {
