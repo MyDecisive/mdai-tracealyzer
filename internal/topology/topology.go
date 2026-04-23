@@ -24,12 +24,6 @@ type operationDeriver interface {
 	Derive(span Span) (string, bool)
 }
 
-var operationDerivers = []operationDeriver{
-	httpOperationDeriver{},
-	rpcOperationDeriver{},
-	messagingOperationDeriver{},
-}
-
 // Span is the topology input model for one finalized span.
 type Span struct {
 	SpanID       [8]byte
@@ -168,12 +162,20 @@ func (a *rootAccumulator) recordSpan(span Span, depth int32, children int32) {
 }
 
 func deriveOperation(span Span) string {
-	for _, deriver := range operationDerivers {
+	for _, deriver := range operationDerivers() {
 		if operation, ok := deriver.Derive(span); ok {
 			return operation
 		}
 	}
 	return fallbackOperation(span.Name)
+}
+
+func operationDerivers() []operationDeriver {
+	return []operationDeriver{
+		httpOperationDeriver{},
+		rpcOperationDeriver{},
+		messagingOperationDeriver{},
+	}
 }
 
 type httpOperationDeriver struct{}
@@ -223,17 +225,22 @@ func childCount(children [][8]byte) int32 {
 }
 
 func int32Len[T any](items []T) int32 {
-	if len(items) > math.MaxInt32 {
-		return math.MaxInt32
-	}
-	return int32(len(items))
+	return safeInt32(len(items))
 }
 
 func int32MapLen[K comparable, V any](items map[K]V) int32 {
-	if len(items) > math.MaxInt32 {
+	return safeInt32(len(items))
+}
+
+func safeInt32(n int) int32 {
+	if n <= 0 {
+		return 0
+	}
+	if n > math.MaxInt32 {
 		return math.MaxInt32
 	}
-	return int32(len(items))
+	//nolint:gosec // The value is explicitly bounded to the int32 range above.
+	return int32(n)
 }
 
 func sortSpanIDs(ids [][8]byte) {
