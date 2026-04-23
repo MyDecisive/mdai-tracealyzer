@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
+	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"go.uber.org/zap"
@@ -279,10 +280,10 @@ func TestEmitterCloseReturnsAsyncWriteError(t *testing.T) {
 	}
 }
 
-func sampleRows(n int) []RootMetrics {
-	rows := make([]RootMetrics, 0, n)
+func sampleRows(n int) []topology.RootMetrics {
+	rows := make([]topology.RootMetrics, 0, n)
 	for i := range n {
-		rows = append(rows, RootMetrics{
+		rows = append(rows, topology.RootMetrics{
 			RootID:          "svc::op",
 			TraceID:         "trace-" + string(rune('a'+i)),
 			RootService:     "svc",

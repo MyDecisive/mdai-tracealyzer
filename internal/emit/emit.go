@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
+	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
@@ -21,25 +22,9 @@ var (
 
 const loggedTraceIDLimit = 10
 
-// RootMetrics is the emitter input contract for the first implementation cut.
-// TODO: move to topology package.
-type RootMetrics struct {
-	RootID          string
-	TraceID         string
-	RootService     string
-	RootOperation   string
-	Breadth         int32
-	ServiceHopDepth int32
-	ServiceCount    int32
-	OperationCount  int32
-	SpanCount       int32
-	ErrorCount      int32
-	RootDurationNS  int64
-}
-
 // Emitter accepts finalized topology rows for eventual emission to GreptimeDB.
 type Emitter interface {
-	Emit(ctx context.Context, rows []RootMetrics) error
+	Emit(ctx context.Context, rows []topology.RootMetrics) error
 	Close(ctx context.Context) error
 }
 
@@ -83,7 +68,7 @@ type emitter struct {
 	mu     sync.Mutex
 	closed bool
 
-	queue  chan []RootMetrics
+	queue  chan []topology.RootMetrics
 	stopCh chan context.Context
 	doneCh chan struct{}
 	wg     sync.WaitGroup
@@ -138,7 +123,7 @@ func newWithWriter(
 		writer:  w,
 		now:     now,
 		sleep:   sleep,
-		queue:   make(chan []RootMetrics, cfg.QueueCapacity),
+		queue:   make(chan []topology.RootMetrics, cfg.QueueCapacity),
 		stopCh:  make(chan context.Context, 1),
 		doneCh:  make(chan struct{}),
 	}
@@ -149,7 +134,7 @@ func newWithWriter(
 	return e
 }
 
-func (e *emitter) Emit(_ context.Context, rows []RootMetrics) error {
+func (e *emitter) Emit(_ context.Context, rows []topology.RootMetrics) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -206,7 +191,7 @@ func (e *emitter) run() {
 	ticker := time.NewTicker(e.cfg.FlushInterval.Duration())
 	defer ticker.Stop()
 
-	pending := make([]RootMetrics, 0, e.cfg.BatchSize)
+	pending := make([]topology.RootMetrics, 0, e.cfg.BatchSize)
 
 	for {
 		select {
@@ -236,7 +221,7 @@ func (e *emitter) run() {
 	}
 }
 
-func (e *emitter) drainQueue(pending []RootMetrics) []RootMetrics {
+func (e *emitter) drainQueue(pending []topology.RootMetrics) []topology.RootMetrics {
 	for {
 		select {
 		case rows := <-e.queue:
@@ -247,7 +232,7 @@ func (e *emitter) drainQueue(pending []RootMetrics) []RootMetrics {
 	}
 }
 
-func (e *emitter) flushReady(parent context.Context, pending *[]RootMetrics) error {
+func (e *emitter) flushReady(parent context.Context, pending *[]topology.RootMetrics) error {
 	var firstErr error
 	for len(*pending) >= e.cfg.BatchSize {
 		chunk := cloneRows((*pending)[:e.cfg.BatchSize])
@@ -259,7 +244,7 @@ func (e *emitter) flushReady(parent context.Context, pending *[]RootMetrics) err
 	return firstErr
 }
 
-func (e *emitter) flushAll(parent context.Context, pending *[]RootMetrics) error {
+func (e *emitter) flushAll(parent context.Context, pending *[]topology.RootMetrics) error {
 	if len(*pending) == 0 {
 		return nil
 	}
@@ -276,7 +261,7 @@ func (e *emitter) flushAll(parent context.Context, pending *[]RootMetrics) error
 	return firstErr
 }
 
-func (e *emitter) writeWithRetry(parent context.Context, batch []RootMetrics) error {
+func (e *emitter) writeWithRetry(parent context.Context, batch []topology.RootMetrics) error {
 	if len(batch) == 0 {
 		return nil
 	}
@@ -302,7 +287,7 @@ func (e *emitter) writeWithRetry(parent context.Context, batch []RootMetrics) er
 	}
 }
 
-func (e *emitter) recordDroppedRows(reason string, rows []RootMetrics, err error) {
+func (e *emitter) recordDroppedRows(reason string, rows []topology.RootMetrics, err error) {
 	e.metrics.emissionsFailed.Add(float64(len(rows)))
 	fields := []zap.Field{
 		zap.String("reason", reason),
@@ -316,7 +301,7 @@ func (e *emitter) recordDroppedRows(reason string, rows []RootMetrics, err error
 	e.logger.Warn("drop topology rows", fields...)
 }
 
-func makeWriteBatch(tableName string, rows []RootMetrics, ts time.Time) writeBatch {
+func makeWriteBatch(tableName string, rows []topology.RootMetrics, ts time.Time) writeBatch {
 	out := make([]row, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, row{
@@ -340,13 +325,13 @@ func makeWriteBatch(tableName string, rows []RootMetrics, ts time.Time) writeBat
 	}
 }
 
-func cloneRows(rows []RootMetrics) []RootMetrics {
-	out := make([]RootMetrics, len(rows))
+func cloneRows(rows []topology.RootMetrics) []topology.RootMetrics {
+	out := make([]topology.RootMetrics, len(rows))
 	copy(out, rows)
 	return out
 }
 
-func boundedTraceIDs(rows []RootMetrics) []string {
+func boundedTraceIDs(rows []topology.RootMetrics) []string {
 	ids := make([]string, 0, min(len(rows), loggedTraceIDLimit))
 	for i := range min(len(rows), loggedTraceIDLimit) {
 		ids = append(ids, rows[i].TraceID)
