@@ -18,6 +18,7 @@ import (
 	"github.com/valkey-io/valkey-go/mock"
 	"go.uber.org/mock/gomock"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestClassifyPutError_NonValkeyErrorIsBackendError(t *testing.T) {
@@ -397,6 +398,8 @@ func TestDrain_ExecError(t *testing.T) {
 func TestDrain_EmptyTrace(t *testing.T) {
 	t.Parallel()
 	m := newMockedBuffer(t)
+	core, logs := observer.New(zap.DebugLevel)
+	m.buf.logger = zap.New(core)
 	dedMock := expectDedicated(t, m)
 
 	dedMock.EXPECT().DoMulti(
@@ -415,6 +418,9 @@ func TestDrain_EmptyTrace(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("want empty map, got %+v", got)
+	}
+	if n := logs.FilterMessage("drain: trace already absent").Len(); n != 1 {
+		t.Errorf("want 1 debug log for empty drain, got %d (all: %v)", n, logs.All())
 	}
 }
 

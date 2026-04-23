@@ -22,6 +22,9 @@ type Metrics struct {
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
+	if reg == nil {
+		return nil
+	}
 	sweeps := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "topology_sweeps_total",
 		Help: "Sweep ticks, partitioned by outcome. result=\"ok\" is a clean tick (including ticks that found nothing finalizable); result=\"scan_error\" is a Valkey Scan failure; result=\"emit_error\" is an Emit failure for the tick's batch. Per-trace drain/compute failures stay inside a tick and do not change this label — see topology_drain_errors_total and topology_compute_errors_total.",
@@ -40,7 +43,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	})
 	compute := prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "topology_compute_errors_total",
-		Help: "Compute failures other than ErrNoRoot. A non-zero value is a bug in the topology computation for a specific trace shape; the trace is dropped after its buffer state was removed.",
+		Help: "Compute failures other than ErrNoRoot. A non-zero value is a bug in the topology computation for a specific trace shape; the trace is dropped after its buffer state was removed. See topology_emissions_failed_total for drops that happen after successful Compute.",
 	})
 	computeSkipped := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "topology_compute_skipped_total",

@@ -32,10 +32,6 @@ type scanArgs struct {
 	ttl   time.Time
 }
 
-func (*fakeBuffer) Put(context.Context, buffer.SpanRecord) error {
-	return errors.New("fakeBuffer.Put: not expected")
-}
-
 func (f *fakeBuffer) Scan(ctx context.Context, quietCutoff, ttlCutoff time.Time) ([]buffer.Finalizable, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -63,11 +59,8 @@ func (f *fakeBuffer) Drain(ctx context.Context, id [16]byte) (map[string]buffer.
 	return f.drainSpans[id], nil
 }
 
-func (*fakeBuffer) Close() {}
-
 type fakeComputer struct {
-	mu      sync.Mutex
-	calls   int
+	calls   atomic.Int64
 	results map[[16]byte]computeResult
 }
 
@@ -77,9 +70,7 @@ type computeResult struct {
 }
 
 func (c *fakeComputer) Compute(id [16]byte, _ string, _ map[string]buffer.SpanRecord) (emit.RootMetrics, error) {
-	c.mu.Lock()
-	c.calls++
-	c.mu.Unlock()
+	c.calls.Add(1)
 	r := c.results[id]
 	return r.rm, r.err
 }
@@ -115,7 +106,7 @@ func (e *fakeEmitter) rowsIn(call int) []emit.RootMetrics {
 
 // newSweeperForTest builds a Sweeper with a fixed wall clock, short
 // interval (unused when tests call tick directly), and a nop logger.
-func newSweeperForTest(t *testing.T, buf buffer.Buffer, c Computer, e emit.Emitter) (*Sweeper, *Metrics) {
+func newSweeperForTest(t *testing.T, buf Buffer, c Computer, e emit.Emitter) (*Sweeper, *Metrics) {
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
@@ -157,8 +148,8 @@ func TestSweeper_EmptyScan_MarksOK(t *testing.T) {
 	if len(buf.drainCalls) != 0 {
 		t.Fatalf("no Drain calls expected, got %d", len(buf.drainCalls))
 	}
-	if comp.calls != 0 {
-		t.Fatalf("no Compute calls expected, got %d", comp.calls)
+	if got := comp.calls.Load(); got != 0 {
+		t.Fatalf("no Compute calls expected, got %d", got)
 	}
 	if em.callCount() != 0 {
 		t.Fatalf("no Emit calls expected, got %d", em.callCount())
@@ -553,12 +544,24 @@ func TestSweeper_Run_ReturnsOnCtxCancel(t *testing.T) {
 	}
 }
 
+func TestNewMetrics_NilRegisterer(t *testing.T) {
+	t.Parallel()
+
+	m := NewMetrics(nil)
+	if m != nil {
+		t.Fatalf("NewMetrics(nil): want nil, got %+v", m)
+	}
+	m.incSweep(resultOK)
+	m.incFinalized(buffer.TriggerQuiet)
+	m.incDrainError()
+	m.incComputeError()
+	m.incComputeSkipped(reasonNoRoot)
+}
+
 func TestNew_ValidatesInputs(t *testing.T) {
 	t.Parallel()
 
 	logger := zap.NewNop()
-	reg := prometheus.NewRegistry()
-	m := NewMetrics(reg)
 	buf := &fakeBuffer{}
 	comp := &fakeComputer{}
 	em := &fakeEmitter{}
@@ -566,7 +569,7 @@ func TestNew_ValidatesInputs(t *testing.T) {
 
 	cases := []struct {
 		name string
-		buf  buffer.Buffer
+		buf  Buffer
 		c    Computer
 		e    emit.Emitter
 		cfg  Config
@@ -584,6 +587,7 @@ func TestNew_ValidatesInputs(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			m := NewMetrics(prometheus.NewRegistry())
 			if _, err := New(tc.buf, tc.c, tc.e, tc.cfg, m, tc.log); err == nil {
 				t.Fatal("want error, got nil")
 			}

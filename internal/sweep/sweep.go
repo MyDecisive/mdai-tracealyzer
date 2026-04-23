@@ -25,6 +25,13 @@ type Computer interface {
 	Compute(traceID [16]byte, trigger string, spans map[string]buffer.SpanRecord) (emit.RootMetrics, error)
 }
 
+// Buffer is the subset of buffer.Buffer that the sweeper depends on. Put
+// and Close belong to the ingest and lifecycle paths respectively.
+type Buffer interface {
+	Scan(ctx context.Context, quietCutoff, ttlCutoff time.Time) ([]buffer.Finalizable, error)
+	Drain(ctx context.Context, traceID [16]byte) (map[string]buffer.SpanRecord, error)
+}
+
 type Config struct {
 	QuietPeriod    time.Duration
 	MaxTTL         time.Duration
@@ -34,7 +41,7 @@ type Config struct {
 
 // Sweeper drives finalization on a ticker: Scan → Drain → Compute → Emit.
 type Sweeper struct {
-	buf      buffer.Buffer
+	buf      Buffer
 	computer Computer
 	emitter  emit.Emitter
 	cfg      Config
@@ -43,7 +50,7 @@ type Sweeper struct {
 	now      func() time.Time
 }
 
-func New(buf buffer.Buffer, c Computer, e emit.Emitter, cfg Config, m *Metrics, logger *zap.Logger) (*Sweeper, error) {
+func New(buf Buffer, c Computer, e emit.Emitter, cfg Config, m *Metrics, logger *zap.Logger) (*Sweeper, error) {
 	if buf == nil {
 		return nil, errors.New("sweep: buffer is required")
 	}
