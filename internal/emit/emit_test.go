@@ -280,6 +280,71 @@ func TestEmitterCloseReturnsAsyncWriteError(t *testing.T) {
 	}
 }
 
+func TestMakeWriteBatchMapsAllTopologyFields(t *testing.T) {
+	t.Parallel()
+
+	ts := time.Unix(1700000100, 456)
+	rows := []topology.RootMetrics{{
+		RootID:          "svc::root-op",
+		TraceID:         "001122",
+		RootService:     "svc",
+		RootOperation:   "root-op",
+		Breadth:         11,
+		ServiceHopDepth: 12,
+		ServiceCount:    13,
+		OperationCount:  14,
+		SpanCount:       15,
+		ErrorCount:      16,
+		RootDurationNS:  17,
+	}}
+
+	batch := makeWriteBatch("trace_root_topology", rows, ts)
+	if batch.Table != "trace_root_topology" {
+		t.Fatalf("want table trace_root_topology, got %q", batch.Table)
+	}
+	if len(batch.Rows) != 1 {
+		t.Fatalf("want 1 row, got %d", len(batch.Rows))
+	}
+
+	got := batch.Rows[0]
+	if got.Timestamp != ts {
+		t.Fatalf("want timestamp %v, got %v", ts, got.Timestamp)
+	}
+	if got.RootID != rows[0].RootID {
+		t.Fatalf("want root_id %q, got %q", rows[0].RootID, got.RootID)
+	}
+	if got.TraceID != rows[0].TraceID {
+		t.Fatalf("want trace_id %q, got %q", rows[0].TraceID, got.TraceID)
+	}
+	if got.RootService != rows[0].RootService {
+		t.Fatalf("want root_service %q, got %q", rows[0].RootService, got.RootService)
+	}
+	if got.RootOperation != rows[0].RootOperation {
+		t.Fatalf("want root_operation %q, got %q", rows[0].RootOperation, got.RootOperation)
+	}
+	if got.Breadth != rows[0].Breadth {
+		t.Fatalf("want breadth %d, got %d", rows[0].Breadth, got.Breadth)
+	}
+	if got.ServiceHopDepth != rows[0].ServiceHopDepth {
+		t.Fatalf("want service_hop_depth %d, got %d", rows[0].ServiceHopDepth, got.ServiceHopDepth)
+	}
+	if got.ServiceCount != rows[0].ServiceCount {
+		t.Fatalf("want service_count %d, got %d", rows[0].ServiceCount, got.ServiceCount)
+	}
+	if got.OperationCount != rows[0].OperationCount {
+		t.Fatalf("want operation_count %d, got %d", rows[0].OperationCount, got.OperationCount)
+	}
+	if got.SpanCount != rows[0].SpanCount {
+		t.Fatalf("want span_count %d, got %d", rows[0].SpanCount, got.SpanCount)
+	}
+	if got.ErrorCount != rows[0].ErrorCount {
+		t.Fatalf("want error_count %d, got %d", rows[0].ErrorCount, got.ErrorCount)
+	}
+	if got.RootDurationNS != rows[0].RootDurationNS {
+		t.Fatalf("want root_duration_ns %d, got %d", rows[0].RootDurationNS, got.RootDurationNS)
+	}
+}
+
 func sampleRows(n int) []topology.RootMetrics {
 	rows := make([]topology.RootMetrics, 0, n)
 	for i := range n {

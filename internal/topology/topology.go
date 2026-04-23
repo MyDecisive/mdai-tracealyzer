@@ -17,12 +17,7 @@ const (
 	unnamedOperation           = "unnamed_operation"
 	rootIDSeparator            = "::"
 	initialServiceHopDepth     = 1
-	defaultRootCapacity        = 1
 )
-
-type operationDeriver interface {
-	Derive(span Span) (string, bool)
-}
 
 // Span is the topology input model for one finalized span.
 type Span struct {
@@ -39,7 +34,7 @@ type Span struct {
 
 // Compute reconstructs trace topology and returns one metrics row per
 // authentic root, plus the number of spans unreachable from any root.
-func Compute(traceID [16]byte, spans map[[8]byte]Span) ([]RootMetrics, int) {
+func Compute(traceID [16]byte, spans map[[8]byte]Span) ([]RootMetrics, int32) {
 	if len(spans) == 0 {
 		return nil, 0
 	}
@@ -56,12 +51,12 @@ func Compute(traceID [16]byte, spans map[[8]byte]Span) ([]RootMetrics, int) {
 		rows = append(rows, computeRoot(traceIDHex, rootID, spans, childrenByParent, visited))
 	}
 
-	return rows, len(spans) - len(visited)
+	return rows, safeInt32(len(spans) - len(visited))
 }
 
 func indexSpans(spans map[[8]byte]Span) (map[[8]byte][][8]byte, [][8]byte) {
 	childrenByParent := make(map[[8]byte][][8]byte)
-	roots := make([][8]byte, 0, defaultRootCapacity)
+	roots := make([][8]byte, 0, 1)
 
 	for spanID, span := range spans {
 		if span.ParentSpanID == ([8]byte{}) {
@@ -92,7 +87,12 @@ type rootAccumulator struct {
 	spanCount       int32
 	errorCount      int32
 	services        map[string]struct{}
-	operations      map[string]struct{}
+	operations      map[operationKey]struct{}
+}
+
+type operationKey struct {
+	service string
+	op      string
 }
 
 func computeRoot(
@@ -106,7 +106,7 @@ func computeRoot(
 	acc := rootAccumulator{
 		serviceHopDepth: initialServiceHopDepth,
 		services:        make(map[string]struct{}),
-		operations:      make(map[string]struct{}),
+		operations:      make(map[operationKey]struct{}),
 	}
 	stack := []frame{{spanID: rootID, depth: initialServiceHopDepth}}
 
@@ -120,7 +120,7 @@ func computeRoot(
 		visited[current.spanID] = struct{}{}
 
 		span := spans[current.spanID]
-		acc.recordSpan(span, current.depth, childCount(childrenByParent[current.spanID]))
+		acc.recordSpan(span, current.depth, childrenByParent[current.spanID])
 
 		children := childrenByParent[current.spanID]
 		for i := len(children) - 1; i >= 0; i-- {
@@ -142,45 +142,39 @@ func computeRoot(
 		RootOperation:   rootOperation,
 		Breadth:         acc.breadth,
 		ServiceHopDepth: acc.serviceHopDepth,
-		ServiceCount:    int32MapLen(acc.services),
-		OperationCount:  int32MapLen(acc.operations),
+		ServiceCount:    safeInt32(len(acc.services)),
+		OperationCount:  safeInt32(len(acc.operations)),
 		SpanCount:       acc.spanCount,
 		ErrorCount:      acc.errorCount,
 		RootDurationNS:  root.EndTimeNs - root.StartTimeNs,
 	}
 }
 
-func (a *rootAccumulator) recordSpan(span Span, depth int32, children int32) {
+func (a *rootAccumulator) recordSpan(span Span, depth int32, children [][8]byte) {
 	a.spanCount++
 	if span.StatusError {
 		a.errorCount++
 	}
-	a.breadth = max(a.breadth, children)
+	a.breadth = max(a.breadth, safeInt32(len(children)))
 	a.serviceHopDepth = max(a.serviceHopDepth, depth)
 	a.services[span.Service] = struct{}{}
-	a.operations[span.Service+"\x00"+deriveOperation(span)] = struct{}{}
+	a.operations[operationKey{service: span.Service, op: deriveOperation(span)}] = struct{}{}
 }
 
 func deriveOperation(span Span) string {
-	for _, deriver := range operationDerivers() {
-		if operation, ok := deriver.Derive(span); ok {
-			return operation
-		}
+	if operation, ok := deriveHTTPOperation(span); ok {
+		return operation
+	}
+	if operation, ok := deriveRPCOperation(span); ok {
+		return operation
+	}
+	if operation, ok := deriveMessagingOperation(span); ok {
+		return operation
 	}
 	return fallbackOperation(span.Name)
 }
 
-func operationDerivers() []operationDeriver {
-	return []operationDeriver{
-		httpOperationDeriver{},
-		rpcOperationDeriver{},
-		messagingOperationDeriver{},
-	}
-}
-
-type httpOperationDeriver struct{}
-
-func (httpOperationDeriver) Derive(span Span) (string, bool) {
+func deriveHTTPOperation(span Span) (string, bool) {
 	method := span.OpAttrs[attrHTTPRequestMethod]
 	if method == "" {
 		return "", false
@@ -191,9 +185,7 @@ func (httpOperationDeriver) Derive(span Span) (string, bool) {
 	return fallbackOperation(span.Name), true
 }
 
-type rpcOperationDeriver struct{}
-
-func (rpcOperationDeriver) Derive(span Span) (string, bool) {
+func deriveRPCOperation(span Span) (string, bool) {
 	rpcService := span.OpAttrs[attrRPCService]
 	rpcMethod := span.OpAttrs[attrRPCMethod]
 	if rpcService == "" || rpcMethod == "" {
@@ -202,9 +194,7 @@ func (rpcOperationDeriver) Derive(span Span) (string, bool) {
 	return rpcService + "/" + rpcMethod, true
 }
 
-type messagingOperationDeriver struct{}
-
-func (messagingOperationDeriver) Derive(span Span) (string, bool) {
+func deriveMessagingOperation(span Span) (string, bool) {
 	messagingOperation := span.OpAttrs[attrMessagingOperationType]
 	messagingDestination := span.OpAttrs[attrMessagingDestination]
 	if messagingOperation == "" || messagingDestination == "" {
@@ -218,18 +208,6 @@ func fallbackOperation(name string) string {
 		return unnamedOperation
 	}
 	return name
-}
-
-func childCount(children [][8]byte) int32 {
-	return int32Len(children)
-}
-
-func int32Len[T any](items []T) int32 {
-	return safeInt32(len(items))
-}
-
-func int32MapLen[K comparable, V any](items map[K]V) int32 {
-	return safeInt32(len(items))
 }
 
 func safeInt32(n int) int32 {
