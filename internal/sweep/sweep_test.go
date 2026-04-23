@@ -148,10 +148,10 @@ func TestSweeper_EmptyScan_MarksOK(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.sweepsOK); got != 1 {
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 1 {
 		t.Fatalf("sweeps_total{ok}: want 1, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.sweepsScanError); got != 0 {
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultScanError)); got != 0 {
 		t.Fatalf("sweeps_total{scan_error}: want 0, got %v", got)
 	}
 	if len(buf.drainCalls) != 0 {
@@ -193,13 +193,13 @@ func TestSweeper_TwoFinalizable_BothEmittedInOneBatch(t *testing.T) {
 	if got := testutil.ToFloat64(m.finalized); got != 2 {
 		t.Fatalf("finalized: want 2, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.triggerQuiet); got != 1 {
+	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)); got != 1 {
 		t.Fatalf("trigger{quiet}: want 1, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.triggerMaxTTL); got != 1 {
+	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerMaxTTL)); got != 1 {
 		t.Fatalf("trigger{max_ttl}: want 1, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.sweepsOK); got != 1 {
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 1 {
 		t.Fatalf("sweeps{ok}: want 1, got %v", got)
 	}
 	if em.callCount() != 1 {
@@ -239,7 +239,7 @@ func TestSweeper_DrainErrorIsolatesFailure(t *testing.T) {
 	if got := testutil.ToFloat64(m.drainErrors); got != 1 {
 		t.Fatalf("drain_errors: want 1, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.triggerQuiet); got != 1 {
+	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)); got != 1 {
 		t.Fatalf("trigger{quiet}: want 1, got %v", got)
 	}
 	if em.callCount() != 1 {
@@ -270,19 +270,19 @@ func TestSweeper_NoRoot_IsExpectedSkip(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.computeSkippedNoRoot); got != 1 {
+	if got := testutil.ToFloat64(m.computeSkipped.WithLabelValues(reasonNoRoot)); got != 1 {
 		t.Fatalf("compute_skipped{no_root}: want 1, got %v", got)
 	}
 	if got := testutil.ToFloat64(m.computeErrors); got != 0 {
 		t.Fatalf("compute_errors: want 0, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.triggerMaxTTL); got != 0 {
+	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerMaxTTL)); got != 0 {
 		t.Fatalf("trigger{max_ttl}: want 0, got %v", got)
 	}
 	if em.callCount() != 0 {
 		t.Fatalf("Emit calls: want 0, got %d", em.callCount())
 	}
-	if got := testutil.ToFloat64(m.sweepsOK); got != 1 {
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 1 {
 		t.Fatalf("sweeps{ok}: want 1, got %v", got)
 	}
 }
@@ -315,7 +315,7 @@ func TestSweeper_ComputeError_DropsRowTickOK(t *testing.T) {
 	if got := testutil.ToFloat64(m.computeErrors); got != 1 {
 		t.Fatalf("compute_errors: want 1, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.sweepsOK); got != 1 {
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 1 {
 		t.Fatalf("sweeps{ok}: want 1, got %v", got)
 	}
 	if em.callCount() != 1 {
@@ -336,10 +336,10 @@ func TestSweeper_ScanError_StopsTick(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.sweepsScanError); got != 1 {
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultScanError)); got != 1 {
 		t.Fatalf("sweeps{scan_error}: want 1, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.sweepsOK); got != 0 {
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 0 {
 		t.Fatalf("sweeps{ok}: want 0, got %v", got)
 	}
 	if len(buf.drainCalls) != 0 {
@@ -370,13 +370,13 @@ func TestSweeper_EmitError_MarksEmitError(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.sweepsEmitError); got != 1 {
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultEmitError)); got != 1 {
 		t.Fatalf("sweeps{emit_error}: want 1, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.sweepsOK); got != 0 {
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 0 {
 		t.Fatalf("sweeps{ok}: want 0, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.triggerQuiet); got != 1 {
+	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)); got != 1 {
 		t.Fatalf("trigger{quiet}: want 1, got %v", got)
 	}
 }
@@ -521,7 +521,7 @@ func TestSweeper_TickRunsToCompletionOnCancel(t *testing.T) {
 	if got := testutil.ToFloat64(m.finalized); got != 1 {
 		t.Fatalf("finalized: want 1, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.sweepsOK); got != 1 {
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 1 {
 		t.Fatalf("sweeps{ok}: want 1, got %v", got)
 	}
 	if got := testutil.ToFloat64(m.drainErrors); got != 0 {

@@ -1,7 +1,6 @@
 package sweep
 
 import (
-	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -14,15 +13,12 @@ const (
 
 // Metrics is nil-safe; methods no-op on a nil receiver.
 type Metrics struct {
-	sweepsOK             prometheus.Counter
-	sweepsScanError      prometheus.Counter
-	sweepsEmitError      prometheus.Counter
-	finalized            prometheus.Counter
-	triggerQuiet         prometheus.Counter
-	triggerMaxTTL        prometheus.Counter
-	drainErrors          prometheus.Counter
-	computeErrors        prometheus.Counter
-	computeSkippedNoRoot prometheus.Counter
+	sweeps         *prometheus.CounterVec
+	trigger        *prometheus.CounterVec
+	computeSkipped *prometheus.CounterVec
+	finalized      prometheus.Counter
+	drainErrors    prometheus.Counter
+	computeErrors  prometheus.Counter
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -53,15 +49,12 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	reg.MustRegister(sweeps, finalized, trigger, drain, compute, computeSkipped)
 
 	return &Metrics{
-		sweepsOK:             sweeps.WithLabelValues(resultOK),
-		sweepsScanError:      sweeps.WithLabelValues(resultScanError),
-		sweepsEmitError:      sweeps.WithLabelValues(resultEmitError),
-		finalized:            finalized,
-		triggerQuiet:         trigger.WithLabelValues(buffer.TriggerQuiet),
-		triggerMaxTTL:        trigger.WithLabelValues(buffer.TriggerMaxTTL),
-		drainErrors:          drain,
-		computeErrors:        compute,
-		computeSkippedNoRoot: computeSkipped.WithLabelValues(reasonNoRoot),
+		sweeps:         sweeps,
+		trigger:        trigger,
+		computeSkipped: computeSkipped,
+		finalized:      finalized,
+		drainErrors:    drain,
+		computeErrors:  compute,
 	}
 }
 
@@ -69,16 +62,7 @@ func (m *Metrics) incSweep(result string) {
 	if m == nil {
 		return
 	}
-	switch result {
-	case resultOK:
-		m.sweepsOK.Inc()
-	case resultScanError:
-		m.sweepsScanError.Inc()
-	case resultEmitError:
-		m.sweepsEmitError.Inc()
-	default:
-		// Callers are internal and pass one of the three defined constants.
-	}
+	m.sweeps.WithLabelValues(result).Inc()
 }
 
 func (m *Metrics) incFinalized(trigger string) {
@@ -86,14 +70,7 @@ func (m *Metrics) incFinalized(trigger string) {
 		return
 	}
 	m.finalized.Inc()
-	switch trigger {
-	case buffer.TriggerQuiet:
-		m.triggerQuiet.Inc()
-	case buffer.TriggerMaxTTL:
-		m.triggerMaxTTL.Inc()
-	default:
-		// Callers pass one of the two defined trigger constants.
-	}
+	m.trigger.WithLabelValues(trigger).Inc()
 }
 
 func (m *Metrics) incDrainError() {
@@ -114,7 +91,5 @@ func (m *Metrics) incComputeSkipped(reason string) {
 	if m == nil {
 		return
 	}
-	if reason == reasonNoRoot {
-		m.computeSkippedNoRoot.Inc()
-	}
+	m.computeSkipped.WithLabelValues(reason).Inc()
 }
