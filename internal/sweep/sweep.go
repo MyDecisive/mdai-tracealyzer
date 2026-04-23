@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
@@ -25,9 +26,10 @@ type Computer interface {
 }
 
 type Config struct {
-	QuietPeriod time.Duration
-	MaxTTL      time.Duration
-	Interval    time.Duration
+	QuietPeriod    time.Duration
+	MaxTTL         time.Duration
+	Interval       time.Duration
+	WorkerPoolSize int
 }
 
 // Sweeper drives finalization on a ticker: Scan → Drain → Compute → Emit.
@@ -62,6 +64,9 @@ func New(buf buffer.Buffer, c Computer, e emit.Emitter, cfg Config, m *Metrics, 
 	}
 	if cfg.MaxTTL <= 0 {
 		return nil, fmt.Errorf("sweep: max_ttl must be > 0, got %v", cfg.MaxTTL)
+	}
+	if cfg.WorkerPoolSize <= 0 {
+		return nil, fmt.Errorf("sweep: worker_pool_size must be > 0, got %v", cfg.WorkerPoolSize)
 	}
 	return &Sweeper{
 		buf:      buf,
@@ -105,40 +110,7 @@ func (s *Sweeper) tick(ctx context.Context) {
 		return
 	}
 
-	rows := make([]emit.RootMetrics, 0, len(finalizable))
-	for _, f := range finalizable {
-		traceHex := hex.EncodeToString(f.TraceID[:])
-
-		spans, drainErr := s.buf.Drain(ctx, f.TraceID)
-		if drainErr != nil {
-			s.metrics.incDrainError()
-			s.logger.Warn("sweep: drain",
-				zap.String("trace_id", traceHex),
-				zap.String("trigger", f.Trigger),
-				zap.Error(drainErr))
-			continue
-		}
-		if len(spans) == 0 {
-			// Already drained (raced) or expired between Scan and Drain.
-			continue
-		}
-
-		rm, computeErr := s.computer.Compute(f.TraceID, f.Trigger, spans)
-		if errors.Is(computeErr, ErrNoRoot) {
-			s.metrics.incComputeSkipped(reasonNoRoot)
-			continue
-		}
-		if computeErr != nil {
-			s.metrics.incComputeError()
-			s.logger.Warn("sweep: compute",
-				zap.String("trace_id", traceHex),
-				zap.String("trigger", f.Trigger),
-				zap.Error(computeErr))
-			continue
-		}
-		s.metrics.incFinalized(f.Trigger)
-		rows = append(rows, rm)
-	}
+	rows := s.fanout(ctx, finalizable)
 
 	if len(rows) == 0 {
 		s.metrics.incSweep(resultOK)
@@ -151,4 +123,75 @@ func (s *Sweeper) tick(ctx context.Context) {
 		return
 	}
 	s.metrics.incSweep(resultOK)
+}
+
+// fanout runs Drain → Compute across a bounded worker pool. Emit batching
+// remains serial in the caller because rows are order-independent within a
+// batch and the emitter already owns queueing.
+func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) []emit.RootMetrics {
+	workers := s.cfg.WorkerPoolSize
+	if workers > len(finalizable) {
+		workers = len(finalizable)
+	}
+
+	jobs := make(chan buffer.Finalizable, len(finalizable))
+	for _, f := range finalizable {
+		jobs <- f
+	}
+	close(jobs)
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		rows = make([]emit.RootMetrics, 0, len(finalizable))
+	)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range jobs {
+				if rm, ok := s.process(ctx, f); ok {
+					mu.Lock()
+					rows = append(rows, rm)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return rows
+}
+
+// process drives one trace through Drain → Compute, updating per-trace
+// metrics. It returns the computed row only when Emit should carry it.
+func (s *Sweeper) process(ctx context.Context, f buffer.Finalizable) (emit.RootMetrics, bool) {
+	spans, drainErr := s.buf.Drain(ctx, f.TraceID)
+	if drainErr != nil {
+		s.metrics.incDrainError()
+		s.logger.Warn("sweep: drain",
+			zap.String("trace_id", hex.EncodeToString(f.TraceID[:])),
+			zap.String("trigger", f.Trigger),
+			zap.Error(drainErr))
+		return emit.RootMetrics{}, false
+	}
+	if len(spans) == 0 {
+		// Already drained (raced) or expired between Scan and Drain.
+		return emit.RootMetrics{}, false
+	}
+
+	rm, computeErr := s.computer.Compute(f.TraceID, f.Trigger, spans)
+	if errors.Is(computeErr, ErrNoRoot) {
+		s.metrics.incComputeSkipped(reasonNoRoot)
+		return emit.RootMetrics{}, false
+	}
+	if computeErr != nil {
+		s.metrics.incComputeError()
+		s.logger.Warn("sweep: compute",
+			zap.String("trace_id", hex.EncodeToString(f.TraceID[:])),
+			zap.String("trigger", f.Trigger),
+			zap.Error(computeErr))
+		return emit.RootMetrics{}, false
+	}
+	s.metrics.incFinalized(f.Trigger)
+	return rm, true
 }

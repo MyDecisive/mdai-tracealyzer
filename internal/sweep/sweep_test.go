@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -113,9 +114,10 @@ func newSweeperForTest(t *testing.T, buf buffer.Buffer, c Computer, e emit.Emitt
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
 	s, err := New(buf, c, e, Config{
-		QuietPeriod: 30 * time.Second,
-		MaxTTL:      5 * time.Minute,
-		Interval:    10 * time.Millisecond,
+		QuietPeriod:    30 * time.Second,
+		MaxTTL:         5 * time.Minute,
+		Interval:       10 * time.Millisecond,
+		WorkerPoolSize: 4,
 	}, m, zap.NewNop())
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -182,11 +184,14 @@ func TestSweeper_TwoFinalizable_BothEmittedInOneBatch(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.finalizedQuiet); got != 1 {
-		t.Fatalf("finalized{quiet}: want 1, got %v", got)
+	if got := testutil.ToFloat64(m.finalized); got != 2 {
+		t.Fatalf("finalized: want 2, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.finalizedMaxTTL); got != 1 {
-		t.Fatalf("finalized{max_ttl}: want 1, got %v", got)
+	if got := testutil.ToFloat64(m.triggerQuiet); got != 1 {
+		t.Fatalf("trigger{quiet}: want 1, got %v", got)
+	}
+	if got := testutil.ToFloat64(m.triggerMaxTTL); got != 1 {
+		t.Fatalf("trigger{max_ttl}: want 1, got %v", got)
 	}
 	if got := testutil.ToFloat64(m.sweepsOK); got != 1 {
 		t.Fatalf("sweeps{ok}: want 1, got %v", got)
@@ -228,8 +233,8 @@ func TestSweeper_DrainErrorIsolatesFailure(t *testing.T) {
 	if got := testutil.ToFloat64(m.drainErrors); got != 1 {
 		t.Fatalf("drain_errors: want 1, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.finalizedQuiet); got != 1 {
-		t.Fatalf("finalized{quiet}: want 1, got %v", got)
+	if got := testutil.ToFloat64(m.triggerQuiet); got != 1 {
+		t.Fatalf("trigger{quiet}: want 1, got %v", got)
 	}
 	if em.callCount() != 1 {
 		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
@@ -265,8 +270,8 @@ func TestSweeper_NoRoot_IsExpectedSkip(t *testing.T) {
 	if got := testutil.ToFloat64(m.computeErrors); got != 0 {
 		t.Fatalf("compute_errors: want 0, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.finalizedMaxTTL); got != 0 {
-		t.Fatalf("finalized{max_ttl}: want 0, got %v", got)
+	if got := testutil.ToFloat64(m.triggerMaxTTL); got != 0 {
+		t.Fatalf("trigger{max_ttl}: want 0, got %v", got)
 	}
 	if em.callCount() != 0 {
 		t.Fatalf("Emit calls: want 0, got %d", em.callCount())
@@ -365,8 +370,8 @@ func TestSweeper_EmitError_MarksEmitError(t *testing.T) {
 	if got := testutil.ToFloat64(m.sweepsOK); got != 0 {
 		t.Fatalf("sweeps{ok}: want 0, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.finalizedQuiet); got != 1 {
-		t.Fatalf("finalized{quiet}: want 1, got %v", got)
+	if got := testutil.ToFloat64(m.triggerQuiet); got != 1 {
+		t.Fatalf("trigger{quiet}: want 1, got %v", got)
 	}
 }
 
@@ -390,6 +395,85 @@ func TestSweeper_TickComputesCutoffsFromNow(t *testing.T) {
 		t.Fatalf("cutoffs: want quiet=%v ttl=%v, got quiet=%v ttl=%v",
 			wantQuiet, wantTTL, got.quiet, got.ttl)
 	}
+}
+
+// TestSweeper_FanoutRunsConcurrently verifies the worker pool drives
+// multiple Compute calls in parallel. The gating computer blocks each call
+// until pool-size calls have arrived; if the sweep were serial, the test
+// would deadlock and trip the 2s timeout.
+func TestSweeper_FanoutRunsConcurrently(t *testing.T) {
+	t.Parallel()
+
+	const pool = 4
+	ids := make([]buffer.Finalizable, pool)
+	drain := make(map[[16]byte]map[string]buffer.SpanRecord, pool)
+	for i := 0; i < pool; i++ {
+		id := traceID(byte(i + 1))
+		ids[i] = buffer.Finalizable{TraceID: id, Trigger: buffer.TriggerQuiet}
+		drain[id] = map[string]buffer.SpanRecord{"s": {TraceID: id}}
+	}
+	buf := &fakeBuffer{scanResult: ids, drainSpans: drain}
+
+	gate := make(chan struct{})
+	var arrivals atomic.Int32
+	comp := &gatingComputer{
+		gate:    gate,
+		arrived: &arrivals,
+		target:  pool,
+	}
+	em := &fakeEmitter{}
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+	s, err := New(buf, comp, em, Config{
+		QuietPeriod:    30 * time.Second,
+		MaxTTL:         5 * time.Minute,
+		Interval:       10 * time.Millisecond,
+		WorkerPoolSize: pool,
+	}, m, zap.NewNop())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.tick(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("tick completed before all workers arrived at the gate — pool is not concurrent")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := arrivals.Load(); got != pool {
+		t.Fatalf("arrivals at gate: want %d, got %d", pool, got)
+	}
+	close(gate)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tick did not complete after gate release")
+	}
+	if em.callCount() != 1 {
+		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
+	}
+	if rows := em.rowsIn(0); len(rows) != pool {
+		t.Fatalf("emitted rows: want %d, got %d", pool, len(rows))
+	}
+}
+
+type gatingComputer struct {
+	gate    chan struct{}
+	arrived *atomic.Int32
+	target  int32
+}
+
+func (g *gatingComputer) Compute(_ [16]byte, _ string, _ map[string]buffer.SpanRecord) (emit.RootMetrics, error) {
+	if g.arrived.Add(1) > g.target {
+		return emit.RootMetrics{}, errors.New("more arrivals than pool size")
+	}
+	<-g.gate
+	return emit.RootMetrics{}, nil
 }
 
 func TestSweeper_Run_ReturnsOnCtxCancel(t *testing.T) {
@@ -425,7 +509,7 @@ func TestNew_ValidatesInputs(t *testing.T) {
 	buf := &fakeBuffer{}
 	comp := &fakeComputer{}
 	em := &fakeEmitter{}
-	goodCfg := Config{QuietPeriod: time.Second, MaxTTL: 2 * time.Second, Interval: time.Second}
+	goodCfg := Config{QuietPeriod: time.Second, MaxTTL: 2 * time.Second, Interval: time.Second, WorkerPoolSize: 1}
 
 	cases := []struct {
 		name string
@@ -439,9 +523,10 @@ func TestNew_ValidatesInputs(t *testing.T) {
 		{"nil computer", buf, nil, em, goodCfg, logger},
 		{"nil emitter", buf, comp, nil, goodCfg, logger},
 		{"nil logger", buf, comp, em, goodCfg, nil},
-		{"zero interval", buf, comp, em, Config{QuietPeriod: time.Second, MaxTTL: 2 * time.Second}, logger},
-		{"zero quiet", buf, comp, em, Config{MaxTTL: 2 * time.Second, Interval: time.Second}, logger},
-		{"zero max_ttl", buf, comp, em, Config{QuietPeriod: time.Second, Interval: time.Second}, logger},
+		{"zero interval", buf, comp, em, Config{QuietPeriod: time.Second, MaxTTL: 2 * time.Second, WorkerPoolSize: 1}, logger},
+		{"zero quiet", buf, comp, em, Config{MaxTTL: 2 * time.Second, Interval: time.Second, WorkerPoolSize: 1}, logger},
+		{"zero max_ttl", buf, comp, em, Config{QuietPeriod: time.Second, Interval: time.Second, WorkerPoolSize: 1}, logger},
+		{"zero worker_pool_size", buf, comp, em, Config{QuietPeriod: time.Second, MaxTTL: 2 * time.Second, Interval: time.Second}, logger},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
