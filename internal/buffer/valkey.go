@@ -60,12 +60,16 @@ func NewValkeyBuffer(opts ValkeyOptions) (*ValkeyBuffer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("valkey client: %w", err)
 	}
+	return newValkeyBufferFromClient(client, opts.MaxTTL, opts.Metrics, opts.Logger), nil
+}
+
+func newValkeyBufferFromClient(client valkey.Client, maxTTL time.Duration, metrics *Metrics, logger *zap.Logger) *ValkeyBuffer {
 	return &ValkeyBuffer{
 		client:  client,
-		maxTTL:  opts.MaxTTL,
-		metrics: opts.Metrics,
-		logger:  opts.Logger,
-	}, nil
+		maxTTL:  maxTTL,
+		metrics: metrics,
+		logger:  logger,
+	}
 }
 
 // Ping runs a single PING against Valkey.
