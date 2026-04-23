@@ -21,6 +21,9 @@ data:
       timeout: {{ .Values.config.emitter.timeout | quote }}
       max_retries: {{ .Values.config.emitter.maxRetries }}
       initial_backoff: {{ .Values.config.emitter.initialBackoff | quote }}
+      batch_size: {{ .Values.config.emitter.batchSize | quote }}
+      flush_interval: {{ .Values.config.emitter.flushInterval | quote }}
+      queue_capacity: {{ .Values.config.emitter.queueCapacity | quote }}
     service:
       log_level: {{ .Values.config.service.logLevel | quote }}
       metrics_endpoint: {{ .Values.config.service.metricsEndpoint | quote }}
