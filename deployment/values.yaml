@@ -46,6 +46,9 @@ config:
     timeout: "10s"
     maxRetries: 3
     initialBackoff: "1s"
+    batchSize: "100"
+    flushInterval: "1s"
+    queueCapacity: "1000"
   service:
     logLevel: "info"
     metricsEndpoint: "0.0.0.0:9090"
