@@ -11,6 +11,8 @@ import (
 	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -112,9 +114,10 @@ func TestNewGreptimeClientRunsHealthCheck(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeSDKClient{}
+	core, logs := observer.New(zap.InfoLevel)
 	got, err := newGreptimeClientWithFactoryAndSleep(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
 		return client, nil
-	}, noSleep)
+	}, noSleep, zap.New(core))
 	if err != nil {
 		t.Fatalf("newGreptimeClientWithFactory: %v", err)
 	}
@@ -127,6 +130,16 @@ func TestNewGreptimeClientRunsHealthCheck(t *testing.T) {
 	if client.closed {
 		t.Fatal("did not expect client to be closed on successful health check")
 	}
+	entries := logs.All()
+	if len(entries) != 2 {
+		t.Fatalf("want 2 info logs, got %d", len(entries))
+	}
+	if entries[0].Message != "attempt GreptimeDB connection" {
+		t.Fatalf("unexpected first log: %q", entries[0].Message)
+	}
+	if entries[1].Message != "connected to GreptimeDB" {
+		t.Fatalf("unexpected second log: %q", entries[1].Message)
+	}
 }
 
 func TestNewGreptimeClientFailsOnHealthCheckError(t *testing.T) {
@@ -137,7 +150,7 @@ func TestNewGreptimeClientFailsOnHealthCheckError(t *testing.T) {
 	}
 	_, err := newGreptimeClientWithFactoryAndSleep(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
 		return client, nil
-	}, noSleep)
+	}, noSleep, zap.NewNop())
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -165,7 +178,7 @@ func TestNewGreptimeClientRetriesHealthCheckUntilSuccess(t *testing.T) {
 	}, func(context.Context, time.Duration) error {
 		sleepCalls++
 		return nil
-	})
+	}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("newGreptimeClientWithFactoryAndSleep: %v", err)
 	}
@@ -201,7 +214,7 @@ func TestNewGreptimeClientStopsAfterConfiguredHealthCheckAttempts(t *testing.T) 
 	}, func(context.Context, time.Duration) error {
 		sleepCalls++
 		return nil
-	})
+	}, zap.NewNop())
 	if err == nil {
 		t.Fatal("expected error")
 	}
