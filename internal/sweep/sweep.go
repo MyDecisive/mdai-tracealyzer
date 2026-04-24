@@ -25,8 +25,9 @@ var ErrNoRoot = errors.New("no root span")
 // The int32 return is the orphan-span count for the trace and is recorded
 // independently of the error: orphans may be non-zero even when ErrNoRoot
 // is returned (e.g. a trace whose every span was unreachable from any root).
+// A trace with multiple authentic roots yields one RootMetrics per root.
 type Computer interface {
-	Compute(traceID [16]byte, trigger string, spans map[string]buffer.SpanRecord) (topology.RootMetrics, int32, error)
+	Compute(traceID [16]byte, trigger string, spans map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error)
 }
 
 // Buffer is the subset of buffer.Buffer that the sweeper depends on. Put
@@ -164,9 +165,9 @@ func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) 
 	for range workers {
 		wg.Go(func() {
 			for f := range jobs {
-				if rm, ok := s.process(ctx, f); ok {
+				if out := s.process(ctx, f); len(out) > 0 {
 					mu.Lock()
-					rows = append(rows, rm)
+					rows = append(rows, out...)
 					mu.Unlock()
 				}
 			}
@@ -177,8 +178,9 @@ func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) 
 }
 
 // process drives one trace through Drain → Compute, updating per-trace
-// metrics. It returns the computed row only when Emit should carry it.
-func (s *Sweeper) process(ctx context.Context, f buffer.Finalizable) (topology.RootMetrics, bool) {
+// metrics. It returns the computed rows only when Emit should carry them.
+// A trace with multiple authentic roots produces one row per root.
+func (s *Sweeper) process(ctx context.Context, f buffer.Finalizable) []topology.RootMetrics {
 	spans, drainErr := s.buf.Drain(ctx, f.TraceID)
 	if drainErr != nil {
 		s.metrics.incDrainError()
@@ -186,21 +188,21 @@ func (s *Sweeper) process(ctx context.Context, f buffer.Finalizable) (topology.R
 			zap.String("trace_id", hex.EncodeToString(f.TraceID[:])),
 			zap.String("trigger", f.Trigger),
 			zap.Error(drainErr))
-		return topology.RootMetrics{}, false
+		return nil
 	}
 	if len(spans) == 0 {
 		// Already drained (raced) or expired between Scan and Drain.
-		return topology.RootMetrics{}, false
+		return nil
 	}
 
 	start := time.Now()
-	rm, orphans, computeErr := s.computer.Compute(f.TraceID, f.Trigger, spans)
+	rows, orphans, computeErr := s.computer.Compute(f.TraceID, f.Trigger, spans)
 	s.metrics.observeComputeDuration(time.Since(start))
 	s.metrics.addOrphanSpans(orphans)
 
 	if errors.Is(computeErr, ErrNoRoot) {
 		s.metrics.incComputeSkipped(reasonNoRoot)
-		return topology.RootMetrics{}, false
+		return nil
 	}
 	if computeErr != nil {
 		s.metrics.incComputeError()
@@ -208,17 +210,13 @@ func (s *Sweeper) process(ctx context.Context, f buffer.Finalizable) (topology.R
 			zap.String("trace_id", hex.EncodeToString(f.TraceID[:])),
 			zap.String("trigger", f.Trigger),
 			zap.Error(computeErr))
-		return topology.RootMetrics{}, false
+		return nil
 	}
 	s.metrics.incFinalized(f.Trigger)
 	s.logger.Debug("sweep: trace finalized",
 		zap.String("trace_id", hex.EncodeToString(f.TraceID[:])),
 		zap.String("trigger", f.Trigger),
-		zap.String("root_service", rm.RootService),
-		zap.String("root_operation", rm.RootOperation),
-		zap.Int32("span_count", rm.SpanCount),
-		zap.Int32("error_count", rm.ErrorCount),
-		zap.Int32("orphan_count", orphans),
-		zap.Int64("root_duration_ns", rm.RootDurationNS))
-	return rm, true
+		zap.Int("root_count", len(rows)),
+		zap.Int32("orphan_count", orphans))
+	return rows
 }

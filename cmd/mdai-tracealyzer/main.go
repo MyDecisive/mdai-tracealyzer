@@ -203,12 +203,12 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	return nil
 }
 
-// topologyComputer returns rows[0] for the single-root v1 contract;
-// additional roots, if any, are dropped. Orphans propagate even on the
+// topologyComputer forwards all authentic roots from topology.Compute;
+// multi-root traces yield one row per root. Orphans propagate even on the
 // ErrNoRoot branch so the sweeper records them for all-orphan traces.
 type topologyComputer struct{}
 
-func (topologyComputer) Compute(traceID [16]byte, _ string, records map[string]buffer.SpanRecord) (topology.RootMetrics, int32, error) {
+func (topologyComputer) Compute(traceID [16]byte, _ string, records map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
 	spans := make(map[[8]byte]topology.Span, len(records))
 	for _, r := range records {
 		spans[r.SpanID] = topology.Span{
@@ -224,10 +224,13 @@ func (topologyComputer) Compute(traceID [16]byte, _ string, records map[string]b
 		}
 	}
 	rows, orphans := topology.Compute(traceID, spans)
-	if len(rows) == 0 {
-		return topology.RootMetrics{}, orphans, sweep.ErrNoRoot
+	if len(rows) == 0 && len(spans) > 0 {
+		return nil, orphans, sweep.ErrNoRoot
 	}
-	return rows[0], orphans, nil
+	if len(rows) == 0 {
+		return nil, orphans, nil
+	}
+	return rows, orphans, nil
 }
 
 func buildAdminMux(registry *prometheus.Registry, ready *app.Readiness) *http.ServeMux {

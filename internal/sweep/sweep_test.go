@@ -72,15 +72,15 @@ type fakeComputer struct {
 }
 
 type computeResult struct {
-	rm      topology.RootMetrics
+	rows    []topology.RootMetrics
 	orphans int32
 	err     error
 }
 
-func (c *fakeComputer) Compute(id [16]byte, _ string, _ map[string]buffer.SpanRecord) (topology.RootMetrics, int32, error) {
+func (c *fakeComputer) Compute(id [16]byte, _ string, _ map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
 	c.calls.Add(1)
 	r := c.results[id]
-	return r.rm, r.orphans, r.err
+	return r.rows, r.orphans, r.err
 }
 
 type fakeEmitter struct {
@@ -164,6 +164,51 @@ func TestSweeper_EmptyScan_MarksOK(t *testing.T) {
 	}
 }
 
+func TestSweeper_MultiRootTrace_EmitsOneRowPerRoot(t *testing.T) {
+	t.Parallel()
+
+	a := traceID(1)
+	buf := &fakeBuffer{
+		scanResult: []buffer.Finalizable{{TraceID: a, Trigger: buffer.TriggerQuiet}},
+		drainSpans: map[[16]byte]map[string]buffer.SpanRecord{
+			a: {"span-a": {TraceID: a}},
+		},
+	}
+	comp := &fakeComputer{
+		results: map[[16]byte]computeResult{
+			a: {rows: []topology.RootMetrics{
+				{TraceID: "a", RootService: "svc-a", RootOperation: "root-a"},
+				{TraceID: "a", RootService: "svc-b", RootOperation: "root-b"},
+			}},
+		},
+	}
+	em := &fakeEmitter{}
+	s, m := newSweeperForTest(t, buf, comp, em)
+
+	s.tick(context.Background())
+
+	if got := testutil.ToFloat64(m.finalized); got != 1 {
+		t.Fatalf("finalized: want 1 (per trace), got %v", got)
+	}
+	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)); got != 1 {
+		t.Fatalf("trigger{quiet}: want 1, got %v", got)
+	}
+	if em.callCount() != 1 {
+		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
+	}
+	rows := em.rowsIn(0)
+	if len(rows) != 2 {
+		t.Fatalf("emitted rows: want 2, got %d", len(rows))
+	}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		seen[r.RootService+"::"+r.RootOperation] = true
+	}
+	if !seen["svc-a::root-a"] || !seen["svc-b::root-b"] {
+		t.Fatalf("expected both roots in emitted batch, got %+v", rows)
+	}
+}
+
 func TestSweeper_TwoFinalizable_BothEmittedInOneBatch(t *testing.T) {
 	t.Parallel()
 
@@ -180,8 +225,8 @@ func TestSweeper_TwoFinalizable_BothEmittedInOneBatch(t *testing.T) {
 	}
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
-			a: {rm: topology.RootMetrics{TraceID: "a"}},
-			b: {rm: topology.RootMetrics{TraceID: "b"}},
+			a: {rows: []topology.RootMetrics{{TraceID: "a"}}},
+			b: {rows: []topology.RootMetrics{{TraceID: "b"}}},
 		},
 	}
 	em := &fakeEmitter{}
@@ -227,7 +272,7 @@ func TestSweeper_DrainErrorIsolatesFailure(t *testing.T) {
 	}
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
-			b: {rm: topology.RootMetrics{TraceID: "b"}},
+			b: {rows: []topology.RootMetrics{{TraceID: "b"}}},
 		},
 	}
 	em := &fakeEmitter{}
@@ -318,7 +363,7 @@ func TestSweeper_ComputeError_DropsRowTickOK(t *testing.T) {
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
 			a: {err: errors.New("compute bug")},
-			b: {rm: topology.RootMetrics{TraceID: "b"}},
+			b: {rows: []topology.RootMetrics{{TraceID: "b"}}},
 		},
 	}
 	em := &fakeEmitter{}
@@ -376,7 +421,7 @@ func TestSweeper_EmitError_MarksEmitError(t *testing.T) {
 	}
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
-			a: {rm: topology.RootMetrics{TraceID: "a"}},
+			a: {rows: []topology.RootMetrics{{TraceID: "a"}}},
 		},
 	}
 	em := &fakeEmitter{err: emit.ErrQueueFull}
@@ -488,12 +533,12 @@ type gatingComputer struct {
 	target  int32
 }
 
-func (g *gatingComputer) Compute(_ [16]byte, _ string, _ map[string]buffer.SpanRecord) (topology.RootMetrics, int32, error) {
+func (g *gatingComputer) Compute(_ [16]byte, _ string, _ map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
 	if g.arrived.Add(1) > g.target {
-		return topology.RootMetrics{}, 0, errors.New("more arrivals than pool size")
+		return nil, 0, errors.New("more arrivals than pool size")
 	}
 	<-g.gate
-	return topology.RootMetrics{}, 0, nil
+	return []topology.RootMetrics{{}}, 0, nil
 }
 
 func TestSweeper_Tick_CancelBeforeScan_IsBenignSkip(t *testing.T) {
@@ -538,7 +583,7 @@ func TestSweeper_Tick_CancelAfterScan_CompletesDrainEmit(t *testing.T) {
 	}
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
-			a: {rm: topology.RootMetrics{TraceID: "a"}},
+			a: {rows: []topology.RootMetrics{{TraceID: "a"}}},
 		},
 	}
 	em := &fakeEmitter{}

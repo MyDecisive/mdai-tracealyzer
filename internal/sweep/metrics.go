@@ -35,7 +35,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	}, []string{"result"})
 	finalized := prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "topology_traces_finalized_total",
-		Help: "Traces finalized and enqueued for emission, one increment per root. Does not imply a successful GreptimeDB write — see topology_emissions_failed_total.",
+		Help: "Traces finalized and enqueued for emission. A multi-root trace increments once regardless of root count; each root becomes one row in the emit batch. Does not imply a successful GreptimeDB write — see topology_emissions_failed_total.",
 	})
 	trigger := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "topology_finalization_trigger_total",
