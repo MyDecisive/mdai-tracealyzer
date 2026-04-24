@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	gpb "github.com/GreptimeTeam/greptime-proto/go/greptime/v1"
 	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
@@ -16,8 +17,14 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	startupHealthCheckAttempts = 3
+	startupHealthCheckInterval = 10 * time.Second
+)
+
 type sdkClient interface {
 	Write(ctx context.Context, tables ...*table.Table) (*gpb.GreptimeResponse, error)
+	HealthCheck(ctx context.Context) (*gpb.HealthCheckResponse, error)
 	Close() error
 }
 
@@ -34,7 +41,27 @@ func newGreptimeWriter(cfg config.Emitter, _ *zap.Logger) (writer, error) {
 	return &greptimeWriter{client: client}, nil
 }
 
-func newGreptimeClient(cfg config.Emitter) (*greptime.Client, error) {
+//nolint:ireturn // The GreptimeDB client is consumed through the sdkClient test seam.
+func newGreptimeClient(cfg config.Emitter) (sdkClient, error) {
+	return newGreptimeClientWithFactoryAndSleep(cfg, func(clientCfg *greptime.Config) (sdkClient, error) {
+		return greptime.NewClient(clientCfg)
+	}, sleepContext)
+}
+
+//nolint:ireturn // The GreptimeDB client is consumed through the sdkClient test seam.
+func newGreptimeClientWithFactory(
+	cfg config.Emitter,
+	factory func(*greptime.Config) (sdkClient, error),
+) (sdkClient, error) {
+	return newGreptimeClientWithFactoryAndSleep(cfg, factory, sleepContext)
+}
+
+//nolint:ireturn // The GreptimeDB client is consumed through the sdkClient test seam.
+func newGreptimeClientWithFactoryAndSleep(
+	cfg config.Emitter,
+	factory func(*greptime.Config) (sdkClient, error),
+	sleep func(context.Context, time.Duration) error,
+) (sdkClient, error) {
 	host, port, err := splitEndpoint(cfg.GreptimeDBEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("parse greptimedb endpoint: %w", err)
@@ -46,11 +73,48 @@ func newGreptimeClient(cfg config.Emitter) (*greptime.Client, error) {
 		WithDatabase(cfg.GreptimeDBDatabase).
 		WithAuth(username, password)
 
-	client, err := greptime.NewClient(clientCfg)
+	client, err := factory(clientCfg)
 	if err != nil {
 		return nil, fmt.Errorf("create greptimedb client: %w", err)
 	}
+
+	if err := checkGreptimeHealth(client, cfg.Timeout.Duration(), sleep); err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+
 	return client, nil
+}
+
+func checkGreptimeHealth(
+	client sdkClient,
+	timeout time.Duration,
+	sleep func(context.Context, time.Duration) error,
+) error {
+	var lastErr error
+
+	for attempt := 0; attempt < startupHealthCheckAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		_, err := client.HealthCheck(ctx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		if attempt == startupHealthCheckAttempts-1 {
+			break
+		}
+		if sleepErr := sleep(context.Background(), startupHealthCheckInterval); sleepErr != nil {
+			return fmt.Errorf("health check greptimedb: %w", sleepErr)
+		}
+	}
+
+	return fmt.Errorf(
+		"health check greptimedb after %d attempts: %w",
+		startupHealthCheckAttempts,
+		lastErr,
+	)
 }
 
 func (w *greptimeWriter) Write(ctx context.Context, batch writeBatch) error {

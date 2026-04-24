@@ -8,14 +8,20 @@ import (
 	"time"
 
 	gpb "github.com/GreptimeTeam/greptime-proto/go/greptime/v1"
+	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table"
+	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"google.golang.org/grpc/metadata"
 )
 
 type fakeSDKClient struct {
-	errs   []error
-	resps  []*gpb.GreptimeResponse
-	writes []sdkWriteCall
+	errs        []error
+	resps       []*gpb.GreptimeResponse
+	writes      []sdkWriteCall
+	healthErr   error
+	healthErrs  []error
+	healthCalls int
+	closed      bool
 }
 
 type sdkWriteCall struct {
@@ -47,8 +53,25 @@ func (c *fakeSDKClient) Write(ctx context.Context, tables ...*table.Table) (*gpb
 	return c.nextResponse(), nil
 }
 
+func (c *fakeSDKClient) HealthCheck(_ context.Context) (*gpb.HealthCheckResponse, error) {
+	c.healthCalls++
+	if len(c.healthErrs) > 0 {
+		err := c.healthErrs[0]
+		c.healthErrs = c.healthErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+		return &gpb.HealthCheckResponse{}, nil
+	}
+	if c.healthErr != nil {
+		return nil, c.healthErr
+	}
+	return &gpb.HealthCheckResponse{}, nil
+}
+
 //nolint:revive // Keep the receiver name consistent with other fakeSDKClient methods.
 func (c *fakeSDKClient) Close() error {
+	c.closed = true
 	return nil
 }
 
@@ -82,6 +105,114 @@ func TestGreptimeWriterAlwaysUsesAutoCreateTable(t *testing.T) {
 	}
 	if client.writes[0].table != "trace_root_topology" {
 		t.Fatalf("write table = %q, want trace_root_topology", client.writes[0].table)
+	}
+}
+
+func TestNewGreptimeClientRunsHealthCheck(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeSDKClient{}
+	got, err := newGreptimeClientWithFactoryAndSleep(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
+		return client, nil
+	}, noSleep)
+	if err != nil {
+		t.Fatalf("newGreptimeClientWithFactory: %v", err)
+	}
+	if got != client {
+		t.Fatal("expected returned client to be the factory client")
+	}
+	if client.healthCalls != 1 {
+		t.Fatalf("want 1 health check, got %d", client.healthCalls)
+	}
+	if client.closed {
+		t.Fatal("did not expect client to be closed on successful health check")
+	}
+}
+
+func TestNewGreptimeClientFailsOnHealthCheckError(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeSDKClient{
+		healthErr: errors.New("unreachable"),
+	}
+	_, err := newGreptimeClientWithFactoryAndSleep(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
+		return client, nil
+	}, noSleep)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "health check greptimedb after 3 attempts") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.healthCalls != startupHealthCheckAttempts {
+		t.Fatalf("want %d health checks, got %d", startupHealthCheckAttempts, client.healthCalls)
+	}
+	if !client.closed {
+		t.Fatal("expected client to be closed after failed health check")
+	}
+}
+
+func TestNewGreptimeClientRetriesHealthCheckUntilSuccess(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeSDKClient{
+		healthErrs: []error{errors.New("unreachable"), errors.New("unreachable"), nil},
+	}
+	sleepCalls := 0
+
+	got, err := newGreptimeClientWithFactoryAndSleep(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
+		return client, nil
+	}, func(context.Context, time.Duration) error {
+		sleepCalls++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("newGreptimeClientWithFactoryAndSleep: %v", err)
+	}
+	if got != client {
+		t.Fatal("expected returned client to be the factory client")
+	}
+	if client.healthCalls != 3 {
+		t.Fatalf("want 3 health checks, got %d", client.healthCalls)
+	}
+	if sleepCalls != 2 {
+		t.Fatalf("want 2 sleep calls, got %d", sleepCalls)
+	}
+	if client.closed {
+		t.Fatal("did not expect client to be closed on successful health check")
+	}
+}
+
+func TestNewGreptimeClientStopsAfterConfiguredHealthCheckAttempts(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeSDKClient{
+		healthErrs: []error{
+			errors.New("unreachable"),
+			errors.New("unreachable"),
+			errors.New("unreachable"),
+			nil,
+		},
+	}
+	sleepCalls := 0
+
+	_, err := newGreptimeClientWithFactoryAndSleep(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
+		return client, nil
+	}, func(context.Context, time.Duration) error {
+		sleepCalls++
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if client.healthCalls != startupHealthCheckAttempts {
+		t.Fatalf("want %d health checks, got %d", startupHealthCheckAttempts, client.healthCalls)
+	}
+	if sleepCalls != startupHealthCheckAttempts-1 {
+		t.Fatalf("want %d sleep calls, got %d", startupHealthCheckAttempts-1, sleepCalls)
+	}
+	if !client.closed {
+		t.Fatal("expected client to be closed after failed health checks")
 	}
 }
 
@@ -171,4 +302,12 @@ func checkColumn(t *testing.T, col *gpb.ColumnSchema, name string, semantic gpb.
 	if col.GetDatatype() != typ {
 		t.Fatalf("column %q datatype = %v, want %v", name, col.GetDatatype(), typ)
 	}
+}
+
+func testGreptimeConfig() config.Emitter {
+	cfg := testEmitterConfig()
+	cfg.GreptimeDBEndpoint = "127.0.0.1:4001"
+	cfg.GreptimeDBDatabase = "mdai"
+	cfg.GreptimeDBAuth = "mdai:secret"
+	return cfg
 }
