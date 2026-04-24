@@ -147,10 +147,7 @@ func (s *Sweeper) tick(parent context.Context) {
 // remains serial in the caller because rows are order-independent within a
 // batch and the emitter already owns queueing.
 func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) []topology.RootMetrics {
-	workers := s.cfg.WorkerPoolSize
-	if workers > len(finalizable) {
-		workers = len(finalizable)
-	}
+	workers := min(s.cfg.WorkerPoolSize, len(finalizable))
 
 	jobs := make(chan buffer.Finalizable, len(finalizable))
 	for _, f := range finalizable {
@@ -163,10 +160,8 @@ func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) 
 		mu   sync.Mutex
 		rows = make([]topology.RootMetrics, 0, len(finalizable))
 	)
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			for f := range jobs {
 				if rm, ok := s.process(ctx, f); ok {
 					mu.Lock()
@@ -174,7 +169,7 @@ func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) 
 					mu.Unlock()
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return rows

@@ -67,6 +67,7 @@ func mainExit(configPath string) int {
 	return 0
 }
 
+//nolint:funlen // TODO: split into startProbes / startIngestServers / awaitServeOrSignal / finalizeShutdown.
 func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	ctx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -90,7 +91,10 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	}
 	defer valkeyBuffer.Close()
 
-	emitter, err := emit.New(cfg.Emitter, logger, registry)
+	// The emitter owns an internal goroutine keyed on its own Close(ctx)
+	// lifecycle; parent cancellation must not abort an in-flight flush, so its
+	// worker deliberately does not inherit ctx.
+	emitter, err := emit.New(cfg.Emitter, logger, registry) //nolint:contextcheck
 	if err != nil {
 		return fmt.Errorf("emitter: %w", err)
 	}

@@ -422,7 +422,7 @@ func TestSweeper_FanoutRunsConcurrently(t *testing.T) {
 	const pool = 4
 	ids := make([]buffer.Finalizable, pool)
 	drain := make(map[[16]byte]map[string]buffer.SpanRecord, pool)
-	for i := 0; i < pool; i++ {
+	for i := range pool {
 		id := traceID(byte(i + 1))
 		ids[i] = buffer.Finalizable{TraceID: id, Trigger: buffer.TriggerQuiet}
 		drain[id] = map[string]buffer.SpanRecord{"s": {TraceID: id}}
