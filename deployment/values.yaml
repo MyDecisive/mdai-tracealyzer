@@ -39,6 +39,7 @@ config:
     quietPeriod: "60s"
     maxTtl: "10m"
     sweepInterval: "5s"
+    # sweepWorkerPoolSize: 4  # defaults to runtime.NumCPU() when unset
   emitter:
     greptimedbEndpoint: "greptimedb:4001"
     greptimedbDatabase: "public"
@@ -46,9 +47,9 @@ config:
     timeout: "10s"
     maxRetries: 3
     initialBackoff: "1s"
-    batchSize: "100"
+    batchSize: 100
     flushInterval: "1s"
-    queueCapacity: "1000"
+    queueCapacity: 1000
   service:
     logLevel: "info"
     metricsEndpoint: "0.0.0.0:9090"

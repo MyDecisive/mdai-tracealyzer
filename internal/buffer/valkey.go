@@ -207,6 +207,13 @@ func (b *ValkeyBuffer) Drain(ctx context.Context, traceID [16]byte) (map[string]
 		return nil, dedErr
 	}
 
+	if len(raw) == 0 {
+		// Hash already expired or was drained by a concurrent sweeper; the
+		// caller receives an empty map and skips the trace without counting
+		// it as an error.
+		b.logger.Debug("drain: trace already absent", zap.String("trace_id", traceHex))
+	}
+
 	out := make(map[string]SpanRecord, len(raw))
 	for spanHex, encoded := range raw {
 		record, err := decodeRecord([]byte(encoded))

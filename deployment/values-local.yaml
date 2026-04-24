@@ -1,0 +1,12 @@
+# Overrides for `make deploy-local` against a kind cluster.
+# Used only by the local development flow; not shipped to downstream installs.
+
+image:
+  pullPolicy: Never
+
+config:
+  emitter:
+    greptimedbEndpoint: "greptimedb-standalone.mdai.svc.cluster.local:4001"
+    greptimedbDatabase: "public"
+  service:
+    logLevel: debug
