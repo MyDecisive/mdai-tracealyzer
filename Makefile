@@ -2,6 +2,7 @@ KIND_CLUSTER_NAME ?= greptime
 KUBECTL_CONTEXT   ?= kind-$(KIND_CLUSTER_NAME)
 NAMESPACE         ?= mdai
 DOCKER_TAG        ?= 0.1.0
+LOCAL_VALUES      ?= deployment/values-local.yaml
 CHART_VERSION     ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
 ifeq ($(CHART_VERSION),)
 CHART_VERSION := 0.1.0
@@ -89,9 +90,8 @@ deploy-local: kind-load
 		--kube-context $(KUBECTL_CONTEXT) \
 		--namespace $(NAMESPACE) \
 		--create-namespace \
-		--set image.tag=$(DOCKER_TAG) \
-		--set image.pullPolicy=Never \
-		--set config.service.logLevel=debug
+		-f $(LOCAL_VALUES) \
+		--set image.tag=$(DOCKER_TAG)
 	$(KUBECTL) rollout restart deployment/mdai-tracealyzer
 
 redeploy: kind-load

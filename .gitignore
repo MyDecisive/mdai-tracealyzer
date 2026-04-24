@@ -23,6 +23,7 @@ vendor/
 # Local build outputs
 /mdai-tracealyzer
 mdai-tracealyzer-*.tgz
+test-stand/demo/demo-control
 
 # Go workspace file
 go.work
