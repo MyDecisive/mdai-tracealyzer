@@ -10,6 +10,7 @@ import (
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/mydecisive/mdai-tracealyzer/internal/emit"
+	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"go.uber.org/zap"
 )
 
@@ -21,8 +22,11 @@ var ErrNoRoot = errors.New("no root span")
 
 // Computer implementations return ErrNoRoot (directly or wrapped) when
 // no root span is discoverable; any other error is treated as a compute bug.
+// The int32 return is the orphan-span count for the trace and is recorded
+// independently of the error: orphans may be non-zero even when ErrNoRoot
+// is returned (e.g. a trace whose every span was unreachable from any root).
 type Computer interface {
-	Compute(traceID [16]byte, trigger string, spans map[string]buffer.SpanRecord) (emit.RootMetrics, error)
+	Compute(traceID [16]byte, trigger string, spans map[string]buffer.SpanRecord) (topology.RootMetrics, int32, error)
 }
 
 // Buffer is the subset of buffer.Buffer that the sweeper depends on. Put
@@ -121,6 +125,7 @@ func (s *Sweeper) tick(parent context.Context) {
 		s.metrics.incSweep(resultOK)
 		return
 	}
+	s.logger.Debug("sweep: finalizable found", zap.Int("count", len(finalizable)))
 
 	rows := s.fanout(ctx, finalizable)
 
@@ -134,13 +139,14 @@ func (s *Sweeper) tick(parent context.Context) {
 		s.metrics.incSweep(resultEmitError)
 		return
 	}
+	s.logger.Debug("sweep: batch emitted", zap.Int("rows", len(rows)))
 	s.metrics.incSweep(resultOK)
 }
 
 // fanout runs Drain → Compute across a bounded worker pool. Emit batching
 // remains serial in the caller because rows are order-independent within a
 // batch and the emitter already owns queueing.
-func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) []emit.RootMetrics {
+func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) []topology.RootMetrics {
 	workers := s.cfg.WorkerPoolSize
 	if workers > len(finalizable) {
 		workers = len(finalizable)
@@ -155,7 +161,7 @@ func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) 
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
-		rows = make([]emit.RootMetrics, 0, len(finalizable))
+		rows = make([]topology.RootMetrics, 0, len(finalizable))
 	)
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -176,7 +182,7 @@ func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) 
 
 // process drives one trace through Drain → Compute, updating per-trace
 // metrics. It returns the computed row only when Emit should carry it.
-func (s *Sweeper) process(ctx context.Context, f buffer.Finalizable) (emit.RootMetrics, bool) {
+func (s *Sweeper) process(ctx context.Context, f buffer.Finalizable) (topology.RootMetrics, bool) {
 	spans, drainErr := s.buf.Drain(ctx, f.TraceID)
 	if drainErr != nil {
 		s.metrics.incDrainError()
@@ -184,17 +190,21 @@ func (s *Sweeper) process(ctx context.Context, f buffer.Finalizable) (emit.RootM
 			zap.String("trace_id", hex.EncodeToString(f.TraceID[:])),
 			zap.String("trigger", f.Trigger),
 			zap.Error(drainErr))
-		return emit.RootMetrics{}, false
+		return topology.RootMetrics{}, false
 	}
 	if len(spans) == 0 {
 		// Already drained (raced) or expired between Scan and Drain.
-		return emit.RootMetrics{}, false
+		return topology.RootMetrics{}, false
 	}
 
-	rm, computeErr := s.computer.Compute(f.TraceID, f.Trigger, spans)
+	start := time.Now()
+	rm, orphans, computeErr := s.computer.Compute(f.TraceID, f.Trigger, spans)
+	s.metrics.observeComputeDuration(time.Since(start))
+	s.metrics.addOrphanSpans(orphans)
+
 	if errors.Is(computeErr, ErrNoRoot) {
 		s.metrics.incComputeSkipped(reasonNoRoot)
-		return emit.RootMetrics{}, false
+		return topology.RootMetrics{}, false
 	}
 	if computeErr != nil {
 		s.metrics.incComputeError()
@@ -202,8 +212,17 @@ func (s *Sweeper) process(ctx context.Context, f buffer.Finalizable) (emit.RootM
 			zap.String("trace_id", hex.EncodeToString(f.TraceID[:])),
 			zap.String("trigger", f.Trigger),
 			zap.Error(computeErr))
-		return emit.RootMetrics{}, false
+		return topology.RootMetrics{}, false
 	}
 	s.metrics.incFinalized(f.Trigger)
+	s.logger.Debug("sweep: trace finalized",
+		zap.String("trace_id", hex.EncodeToString(f.TraceID[:])),
+		zap.String("trigger", f.Trigger),
+		zap.String("root_service", rm.RootService),
+		zap.String("root_operation", rm.RootOperation),
+		zap.Int32("span_count", rm.SpanCount),
+		zap.Int32("error_count", rm.ErrorCount),
+		zap.Int32("orphan_count", orphans),
+		zap.Int64("root_duration_ns", rm.RootDurationNS))
 	return rm, true
 }

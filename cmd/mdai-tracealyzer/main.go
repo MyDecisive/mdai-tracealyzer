@@ -20,6 +20,7 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
 	"github.com/mydecisive/mdai-tracealyzer/internal/observability"
 	"github.com/mydecisive/mdai-tracealyzer/internal/sweep"
+	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -104,7 +105,7 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		_ = emitter.Close(closeCtx)
 	}()
 
-	sweeper, err := sweep.New(valkeyBuffer, stubComputer{}, emitter, sweep.Config{
+	sweeper, err := sweep.New(valkeyBuffer, topologyComputer{}, emitter, sweep.Config{
 		QuietPeriod:    cfg.Buffer.QuietPeriod.Duration(),
 		MaxTTL:         cfg.Buffer.MaxTTL.Duration(),
 		Interval:       cfg.Buffer.SweepInterval.Duration(),
@@ -132,8 +133,6 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		zap.Duration("shutdown_grace", cfg.Service.ShutdownGrace.Duration()),
 		zap.Strings("readiness_pending", ready.Pending()),
 	)
-	logger.Warn("sweeper running with stub computer; traces drain from Valkey without emitting topology rows until a real Computer is wired")
-
 	var probeWG sync.WaitGroup
 	probeWG.Go(func() {
 		if err := valkeyBuffer.WaitUntilReady(ctx); err != nil {
@@ -199,13 +198,31 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	return nil
 }
 
-// stubComputer reports every trace as root-less so the sweeper's Scan →
-// Drain → Compute → Emit loop exercises end-to-end wiring without emitting
-// topology rows. Replace once a real Computer implementation exists.
-type stubComputer struct{}
+// topologyComputer returns rows[0] for the single-root v1 contract;
+// additional roots, if any, are dropped. Orphans propagate even on the
+// ErrNoRoot branch so the sweeper records them for all-orphan traces.
+type topologyComputer struct{}
 
-func (stubComputer) Compute(_ [16]byte, _ string, _ map[string]buffer.SpanRecord) (emit.RootMetrics, error) {
-	return emit.RootMetrics{}, sweep.ErrNoRoot
+func (topologyComputer) Compute(traceID [16]byte, _ string, records map[string]buffer.SpanRecord) (topology.RootMetrics, int32, error) {
+	spans := make(map[[8]byte]topology.Span, len(records))
+	for _, r := range records {
+		spans[r.SpanID] = topology.Span{
+			SpanID:       r.SpanID,
+			ParentSpanID: r.ParentSpanID,
+			Service:      r.Service,
+			Name:         r.Name,
+			Kind:         r.Kind,
+			StartTimeNs:  r.StartTimeNs,
+			EndTimeNs:    r.EndTimeNs,
+			StatusError:  r.StatusError,
+			OpAttrs:      r.OpAttrs,
+		}
+	}
+	rows, orphans := topology.Compute(traceID, spans)
+	if len(rows) == 0 {
+		return topology.RootMetrics{}, orphans, sweep.ErrNoRoot
+	}
+	return rows[0], orphans, nil
 }
 
 func buildAdminMux(registry *prometheus.Registry, ready *app.Readiness) *http.ServeMux {

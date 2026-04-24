@@ -10,8 +10,10 @@ import (
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/mydecisive/mdai-tracealyzer/internal/emit"
+	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"go.uber.org/zap"
 )
 
@@ -65,26 +67,27 @@ type fakeComputer struct {
 }
 
 type computeResult struct {
-	rm  emit.RootMetrics
-	err error
+	rm      topology.RootMetrics
+	orphans int32
+	err     error
 }
 
-func (c *fakeComputer) Compute(id [16]byte, _ string, _ map[string]buffer.SpanRecord) (emit.RootMetrics, error) {
+func (c *fakeComputer) Compute(id [16]byte, _ string, _ map[string]buffer.SpanRecord) (topology.RootMetrics, int32, error) {
 	c.calls.Add(1)
 	r := c.results[id]
-	return r.rm, r.err
+	return r.rm, r.orphans, r.err
 }
 
 type fakeEmitter struct {
 	mu    sync.Mutex
-	calls [][]emit.RootMetrics
+	calls [][]topology.RootMetrics
 	err   error
 }
 
-func (e *fakeEmitter) Emit(_ context.Context, rows []emit.RootMetrics) error {
+func (e *fakeEmitter) Emit(_ context.Context, rows []topology.RootMetrics) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	cloned := make([]emit.RootMetrics, len(rows))
+	cloned := make([]topology.RootMetrics, len(rows))
 	copy(cloned, rows)
 	e.calls = append(e.calls, cloned)
 	return e.err
@@ -98,7 +101,7 @@ func (e *fakeEmitter) callCount() int {
 	return len(e.calls)
 }
 
-func (e *fakeEmitter) rowsIn(call int) []emit.RootMetrics {
+func (e *fakeEmitter) rowsIn(call int) []topology.RootMetrics {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.calls[call]
@@ -172,8 +175,8 @@ func TestSweeper_TwoFinalizable_BothEmittedInOneBatch(t *testing.T) {
 	}
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
-			a: {rm: emit.RootMetrics{TraceID: "a"}},
-			b: {rm: emit.RootMetrics{TraceID: "b"}},
+			a: {rm: topology.RootMetrics{TraceID: "a"}},
+			b: {rm: topology.RootMetrics{TraceID: "b"}},
 		},
 	}
 	em := &fakeEmitter{}
@@ -219,7 +222,7 @@ func TestSweeper_DrainErrorIsolatesFailure(t *testing.T) {
 	}
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
-			b: {rm: emit.RootMetrics{TraceID: "b"}},
+			b: {rm: topology.RootMetrics{TraceID: "b"}},
 		},
 	}
 	em := &fakeEmitter{}
@@ -253,7 +256,7 @@ func TestSweeper_NoRoot_IsExpectedSkip(t *testing.T) {
 	}
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
-			a: {err: ErrNoRoot},
+			a: {orphans: 3, err: ErrNoRoot},
 		},
 	}
 	em := &fakeEmitter{}
@@ -267,6 +270,12 @@ func TestSweeper_NoRoot_IsExpectedSkip(t *testing.T) {
 	if got := testutil.ToFloat64(m.computeErrors); got != 0 {
 		t.Fatalf("compute_errors: want 0, got %v", got)
 	}
+	if got := testutil.ToFloat64(m.orphanSpans); got != 3 {
+		t.Fatalf("orphan_spans: want 3, got %v", got)
+	}
+	if got := histogramCount(t, m.computeDuration); got != 1 {
+		t.Fatalf("compute_duration observations: want 1, got %d", got)
+	}
 	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerMaxTTL)); got != 0 {
 		t.Fatalf("trigger{max_ttl}: want 0, got %v", got)
 	}
@@ -276,6 +285,15 @@ func TestSweeper_NoRoot_IsExpectedSkip(t *testing.T) {
 	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 1 {
 		t.Fatalf("sweeps{ok}: want 1, got %v", got)
 	}
+}
+
+func histogramCount(t *testing.T, h prometheus.Histogram) uint64 {
+	t.Helper()
+	var mt dto.Metric
+	if err := h.Write(&mt); err != nil {
+		t.Fatalf("histogram Write: %v", err)
+	}
+	return mt.GetHistogram().GetSampleCount()
 }
 
 func TestSweeper_ComputeError_DropsRowTickOK(t *testing.T) {
@@ -295,7 +313,7 @@ func TestSweeper_ComputeError_DropsRowTickOK(t *testing.T) {
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
 			a: {err: errors.New("compute bug")},
-			b: {rm: emit.RootMetrics{TraceID: "b"}},
+			b: {rm: topology.RootMetrics{TraceID: "b"}},
 		},
 	}
 	em := &fakeEmitter{}
@@ -353,7 +371,7 @@ func TestSweeper_EmitError_MarksEmitError(t *testing.T) {
 	}
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
-			a: {rm: emit.RootMetrics{TraceID: "a"}},
+			a: {rm: topology.RootMetrics{TraceID: "a"}},
 		},
 	}
 	em := &fakeEmitter{err: emit.ErrQueueFull}
@@ -465,12 +483,12 @@ type gatingComputer struct {
 	target  int32
 }
 
-func (g *gatingComputer) Compute(_ [16]byte, _ string, _ map[string]buffer.SpanRecord) (emit.RootMetrics, error) {
+func (g *gatingComputer) Compute(_ [16]byte, _ string, _ map[string]buffer.SpanRecord) (topology.RootMetrics, int32, error) {
 	if g.arrived.Add(1) > g.target {
-		return emit.RootMetrics{}, errors.New("more arrivals than pool size")
+		return topology.RootMetrics{}, 0, errors.New("more arrivals than pool size")
 	}
 	<-g.gate
-	return emit.RootMetrics{}, nil
+	return topology.RootMetrics{}, 0, nil
 }
 
 // TestSweeper_TickRunsToCompletionOnCancel verifies that a parent-ctx cancel
@@ -490,7 +508,7 @@ func TestSweeper_TickRunsToCompletionOnCancel(t *testing.T) {
 	}
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
-			a: {rm: emit.RootMetrics{TraceID: "a"}},
+			a: {rm: topology.RootMetrics{TraceID: "a"}},
 		},
 	}
 	em := &fakeEmitter{}
@@ -556,6 +574,8 @@ func TestNewMetrics_NilRegisterer(t *testing.T) {
 	m.incDrainError()
 	m.incComputeError()
 	m.incComputeSkipped(reasonNoRoot)
+	m.addOrphanSpans(3)
+	m.observeComputeDuration(time.Millisecond)
 }
 
 func TestNew_ValidatesInputs(t *testing.T) {

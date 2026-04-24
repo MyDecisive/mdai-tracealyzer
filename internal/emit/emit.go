@@ -271,6 +271,10 @@ func (e *emitter) writeWithRetry(parent context.Context, batch []topology.RootMe
 		err := e.writer.Write(ctx, makeWriteBatch(e.cfg.TableName, batch, e.now()))
 		cancel()
 		if err == nil {
+			e.logger.Debug("emit: batch written",
+				zap.String("table", e.cfg.TableName),
+				zap.Int("rows", len(batch)),
+				zap.Int("attempt", attempt))
 			return nil
 		}
 

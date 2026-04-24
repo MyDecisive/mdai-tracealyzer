@@ -1,6 +1,8 @@
 package sweep
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -13,12 +15,14 @@ const (
 
 // Metrics is nil-safe; methods no-op on a nil receiver.
 type Metrics struct {
-	sweeps         *prometheus.CounterVec
-	trigger        *prometheus.CounterVec
-	computeSkipped *prometheus.CounterVec
-	finalized      prometheus.Counter
-	drainErrors    prometheus.Counter
-	computeErrors  prometheus.Counter
+	sweeps          *prometheus.CounterVec
+	trigger         *prometheus.CounterVec
+	computeSkipped  *prometheus.CounterVec
+	finalized       prometheus.Counter
+	drainErrors     prometheus.Counter
+	computeErrors   prometheus.Counter
+	orphanSpans     prometheus.Counter
+	computeDuration prometheus.Histogram
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -49,15 +53,25 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		Name: "topology_compute_skipped_total",
 		Help: "Expected skips during compute. reason=\"no_root\" is a trace with no discoverable root span (e.g. an orphan flushed by max_ttl before the root arrived).",
 	}, []string{"reason"})
-	reg.MustRegister(sweeps, finalized, trigger, drain, compute, computeSkipped)
+	orphan := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "topology_orphan_spans_total",
+		Help: "Spans dropped at reconstruction because they were not reachable from any authentic root. Rising values indicate pathological truncation upstream.",
+	})
+	computeDuration := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "topology_compute_duration_seconds",
+		Help: "Per-trace topology computation time, measured around a single Compute call.",
+	})
+	reg.MustRegister(sweeps, finalized, trigger, drain, compute, computeSkipped, orphan, computeDuration)
 
 	return &Metrics{
-		sweeps:         sweeps,
-		trigger:        trigger,
-		computeSkipped: computeSkipped,
-		finalized:      finalized,
-		drainErrors:    drain,
-		computeErrors:  compute,
+		sweeps:          sweeps,
+		trigger:         trigger,
+		computeSkipped:  computeSkipped,
+		finalized:       finalized,
+		drainErrors:     drain,
+		computeErrors:   compute,
+		orphanSpans:     orphan,
+		computeDuration: computeDuration,
 	}
 }
 
@@ -95,4 +109,18 @@ func (m *Metrics) incComputeSkipped(reason string) {
 		return
 	}
 	m.computeSkipped.WithLabelValues(reason).Inc()
+}
+
+func (m *Metrics) addOrphanSpans(n int32) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.orphanSpans.Add(float64(n))
+}
+
+func (m *Metrics) observeComputeDuration(d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.computeDuration.Observe(d.Seconds())
 }
