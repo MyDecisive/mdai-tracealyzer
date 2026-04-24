@@ -49,14 +49,6 @@ func newGreptimeClient(cfg config.Emitter, logger *zap.Logger) (sdkClient, error
 }
 
 //nolint:ireturn // The GreptimeDB client is consumed through the sdkClient test seam.
-func newGreptimeClientWithFactory(
-	cfg config.Emitter,
-	factory func(*greptime.Config) (sdkClient, error),
-) (sdkClient, error) {
-	return newGreptimeClientWithFactoryAndSleep(cfg, factory, sleepContext, zap.NewNop())
-}
-
-//nolint:ireturn // The GreptimeDB client is consumed through the sdkClient test seam.
 func newGreptimeClientWithFactoryAndSleep(
 	cfg config.Emitter,
 	factory func(*greptime.Config) (sdkClient, error),
@@ -98,7 +90,7 @@ func checkGreptimeHealth(
 ) error {
 	var lastErr error
 
-	for attempt := 0; attempt < startupHealthCheckAttempts; attempt++ {
+	for attempt := range startupHealthCheckAttempts {
 		attemptNum := attempt + 1
 		logger.Info("attempt GreptimeDB connection",
 			zap.Int("attempt", attemptNum),
