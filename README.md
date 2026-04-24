@@ -6,8 +6,6 @@ Trace topology service — computes structural metrics from OTLP traces and writ
 
 The v1 target: ingest OTLP spans (gRPC on `4317`, HTTP on `4318`), buffer them per trace in Valkey, and — once a trace is quiet for long enough or hits its max TTL — compute topology metrics (breadth, service-hop depth, service/operation/span/error counts, root duration) and write one row per root to the `trace_root_topology` table in GreptimeDB. A dashboard built on that table surfaces traces worth keeping for tail-sampling decisions.
 
-**Current build status:** OTLP ingest and the Valkey buffer are implemented. Sweep (quiet/max_ttl finalization), topology compute, and the GreptimeDB emitter are not yet wired up — spans are accepted and buffered, but no rows are written to GreptimeDB in this build.
-
 The service does not make the sampling decision itself, store full trace data, render the dashboard, or alert. Span-link handling and genuinely multi-root traces are deferred past v1.
 
 ## Running the test-stand demo
@@ -81,11 +79,28 @@ make demo-agent-logs                                   # Datadog agent logs
 curl -s localhost:9090/metrics | grep ^topology_      # requires make metrics-forward
 ```
 
-The ingest/buffer counters currently exposed are:
+The `topology_` metrics exposed are:
+
+**Ingest and buffer:**
 
 - `topology_spans_received_total` — spans accepted by the OTLP receivers.
 - `topology_spans_malformed_total{stage="ingest"|"drain"}` — decoding failures, split by pipeline stage.
 - `topology_buffer_rejected_total{reason="overflow"|"backend_error"}` — Valkey write rejections (maxmemory pressure vs. any other backend failure).
+
+**Sweep and compute:**
+
+- `topology_sweeps_total{result="ok"|"scan_error"|"emit_error"}` — sweep ticks, partitioned by outcome. `ok` includes ticks that found nothing finalizable.
+- `topology_traces_finalized_total` — traces enqueued for emission, one increment per root. Success of the GreptimeDB write is tracked separately.
+- `topology_finalization_trigger_total{trigger="quiet"|"max_ttl"}` — why each finalized trace was picked up.
+- `topology_drain_errors_total` — per-trace Valkey `Drain` failures; the tick continues past them.
+- `topology_compute_errors_total` — compute failures other than `ErrNoRoot`; non-zero indicates a bug for a specific trace shape.
+- `topology_compute_skipped_total{reason="no_root"}` — traces skipped for a known reason during compute.
+- `topology_orphan_spans_total` — spans unreachable from any root.
+- `topology_compute_duration_seconds` (histogram) — per-trace compute latency.
+
+**Emit:**
+
+- `topology_emissions_failed_total` — topology rows dropped before a successful GreptimeDB write.
 
 ### Tear down
 

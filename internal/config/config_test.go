@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ func TestLoad_DefaultsWhenNoPath(t *testing.T) {
 	assertDuration(t, 60*time.Second, cfg.Buffer.QuietPeriod)
 	assertDuration(t, 10*time.Minute, cfg.Buffer.MaxTTL)
 	assertDuration(t, 5*time.Second, cfg.Buffer.SweepInterval)
+	assertEqual(t, runtime.NumCPU(), cfg.Buffer.SweepWorkerPoolSize)
 	assertEqual(t, "greptimedb:4001", cfg.Emitter.GreptimeDBEndpoint)
 	assertEqual(t, "public", cfg.Emitter.GreptimeDBDatabase)
 	assertEqual(t, "trace_root_topology", cfg.Emitter.TableName)

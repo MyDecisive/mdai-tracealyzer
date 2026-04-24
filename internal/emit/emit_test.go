@@ -93,7 +93,7 @@ func TestEmitterFlushesOnBatchSize(t *testing.T) {
 		t.Fatalf("want 2 rows, got %d", len(batch.Rows))
 	}
 	wantTS := fixedNow()()
-	if batch.Rows[0].Timestamp != wantTS {
+	if !batch.Rows[0].Timestamp.Equal(wantTS) {
 		t.Fatalf("want timestamp %v, got %v", wantTS, batch.Rows[0].Timestamp)
 	}
 
@@ -307,7 +307,7 @@ func TestMakeWriteBatchMapsAllTopologyFields(t *testing.T) {
 	}
 
 	got := batch.Rows[0]
-	if got.Timestamp != ts {
+	if !got.Timestamp.Equal(ts) {
 		t.Fatalf("want timestamp %v, got %v", ts, got.Timestamp)
 	}
 	if got.RootID != rows[0].RootID {

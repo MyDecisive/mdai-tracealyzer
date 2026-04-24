@@ -16,8 +16,11 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/app"
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
+	"github.com/mydecisive/mdai-tracealyzer/internal/emit"
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
 	"github.com/mydecisive/mdai-tracealyzer/internal/observability"
+	"github.com/mydecisive/mdai-tracealyzer/internal/sweep"
+	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -64,11 +67,16 @@ func mainExit(configPath string) int {
 	return 0
 }
 
+//nolint:funlen // TODO: split into startProbes / startIngestServers / awaitServeOrSignal / finalizeShutdown.
 func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
+	ctx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
 	ready := app.NewReadiness("otlp_grpc", "otlp_http", "buffer")
 	registry := observability.NewRegistry()
 	ingestMetrics := ingest.NewMetrics(registry)
 	bufferMetrics := buffer.NewMetrics(registry, ingestMetrics.MalformedDrainCounter())
+	sweepMetrics := sweep.NewMetrics(registry)
 
 	valkeyBuffer, err := buffer.NewValkeyBuffer(buffer.ValkeyOptions{
 		Addr:     cfg.Buffer.ValkeyAddr,
@@ -82,6 +90,34 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		return fmt.Errorf("valkey buffer: %w", err)
 	}
 	defer valkeyBuffer.Close()
+
+	// The emitter owns an internal goroutine keyed on its own Close(ctx)
+	// lifecycle; parent cancellation must not abort an in-flight flush, so its
+	// worker deliberately does not inherit ctx.
+	emitter, err := emit.New(cfg.Emitter, logger, registry) //nolint:contextcheck
+	if err != nil {
+		return fmt.Errorf("emitter: %w", err)
+	}
+	// Safety net for early-return paths. The main shutdown path closes the
+	// emitter explicitly under shutdownCtx; a subsequent Close on the same
+	// emitter blocks on the already-closed done channel and is idempotent.
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx), cfg.Service.ShutdownGrace.Duration(),
+		)
+		defer cancel()
+		_ = emitter.Close(closeCtx)
+	}()
+
+	sweeper, err := sweep.New(valkeyBuffer, topologyComputer{}, emitter, sweep.Config{
+		QuietPeriod:    cfg.Buffer.QuietPeriod.Duration(),
+		MaxTTL:         cfg.Buffer.MaxTTL.Duration(),
+		Interval:       cfg.Buffer.SweepInterval.Duration(),
+		WorkerPoolSize: cfg.Buffer.SweepWorkerPoolSize,
+	}, sweepMetrics, logger)
+	if err != nil {
+		return fmt.Errorf("sweeper: %w", err)
+	}
 
 	listeners, err := openListeners(ctx, cfg)
 	if err != nil {
@@ -101,7 +137,6 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		zap.Duration("shutdown_grace", cfg.Service.ShutdownGrace.Duration()),
 		zap.Strings("readiness_pending", ready.Pending()),
 	)
-
 	var probeWG sync.WaitGroup
 	probeWG.Go(func() {
 		if err := valkeyBuffer.WaitUntilReady(ctx); err != nil {
@@ -109,6 +144,13 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		}
 		ready.Mark("buffer")
 		logger.Info("valkey reachable; buffer ready")
+	})
+
+	var sweeperWG sync.WaitGroup
+	sweeperWG.Go(func() {
+		if err := sweeper.Run(ctx); err != nil {
+			logger.Error("sweeper exited", zap.Error(err))
+		}
 	})
 
 	errCh := make(chan serveResult, numServers)
@@ -132,12 +174,25 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		}
 	}
 
+	// Propagate shutdown to the sweeper goroutine when a server crash — not a
+	// signal — triggered the wind-down; SIGTERM already cancelled ctx.
+	cancelRun()
+
 	shutdownCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(ctx), cfg.Service.ShutdownGrace.Duration(),
 	)
 	defer cancel()
 
 	shutdownErr := gracefulShutdown(shutdownCtx, errCh, remaining, &probeWG, logger, adminServer, grpcServer, httpServer)
+
+	// Wait for the sweeper's in-flight tick before closing the emitter so a
+	// late Emit cannot land after the queue starts draining; bounded by
+	// shutdownCtx so a stalled Drain cannot block exit past the grace.
+	waitForSweeper(shutdownCtx, &sweeperWG, logger)
+	if err := emitter.Close(shutdownCtx); err != nil {
+		logger.Warn("close emitter", zap.Error(err))
+	}
+
 	if serveErr != nil {
 		return serveErr
 	}
@@ -146,6 +201,36 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	}
 	logger.Info("service stopped")
 	return nil
+}
+
+// topologyComputer forwards all authentic roots from topology.Compute;
+// multi-root traces yield one row per root. Orphans propagate even on the
+// ErrNoRoot branch so the sweeper records them for all-orphan traces.
+type topologyComputer struct{}
+
+func (topologyComputer) Compute(traceID [16]byte, _ string, records map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
+	spans := make(map[[8]byte]topology.Span, len(records))
+	for _, r := range records {
+		spans[r.SpanID] = topology.Span{
+			SpanID:       r.SpanID,
+			ParentSpanID: r.ParentSpanID,
+			Service:      r.Service,
+			Name:         r.Name,
+			Kind:         r.Kind,
+			StartTimeNs:  r.StartTimeNs,
+			EndTimeNs:    r.EndTimeNs,
+			StatusError:  r.StatusError,
+			OpAttrs:      r.OpAttrs,
+		}
+	}
+	rows, orphans := topology.Compute(traceID, spans)
+	if len(rows) == 0 && len(spans) > 0 {
+		return nil, orphans, sweep.ErrNoRoot
+	}
+	if len(rows) == 0 {
+		return nil, orphans, nil
+	}
+	return rows, orphans, nil
 }
 
 func buildAdminMux(registry *prometheus.Registry, ready *app.Readiness) *http.ServeMux {
@@ -216,6 +301,19 @@ func gracefulShutdown(ctx context.Context, errCh <-chan serveResult, n int, prob
 	waitForServers(ctx, errCh, n, logger)
 	probeWG.Wait()
 	return err
+}
+
+func waitForSweeper(ctx context.Context, wg *sync.WaitGroup, logger *zap.Logger) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		logger.Warn("timed out waiting for sweeper shutdown", zap.Error(ctx.Err()))
+	}
 }
 
 func waitForServers(ctx context.Context, errCh <-chan serveResult, n int, logger *zap.Logger) {

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"math"
-	"sort"
+	"slices"
 )
 
 const (
@@ -222,7 +222,7 @@ func safeInt32(n int) int32 {
 }
 
 func sortSpanIDs(ids [][8]byte) {
-	sort.Slice(ids, func(i, j int) bool {
-		return bytes.Compare(ids[i][:], ids[j][:]) < 0
+	slices.SortFunc(ids, func(a, b [8]byte) int {
+		return bytes.Compare(a[:], b[:])
 	})
 }

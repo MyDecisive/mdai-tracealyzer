@@ -39,6 +39,7 @@ config:
     quietPeriod: "60s"
     maxTtl: "10m"
     sweepInterval: "5s"
+    # sweepWorkerPoolSize: 4  # defaults to runtime.NumCPU() when unset
   emitter:
     greptimedbEndpoint: "greptimedb:4001"
     greptimedbDatabase: "public"

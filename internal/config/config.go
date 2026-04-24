@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -44,12 +45,13 @@ type Ingestion struct {
 
 // Buffer configures the Valkey-backed span buffer and sweep cadence.
 type Buffer struct {
-	ValkeyAddr     string   `envconfig:"VALKEY_ADDR"     yaml:"valkey_addr"`
-	ValkeyDB       int      `envconfig:"VALKEY_DB"       yaml:"valkey_db"`
-	ValkeyPassword string   `envconfig:"VALKEY_PASSWORD" yaml:"-"`
-	QuietPeriod    Duration `envconfig:"QUIET_PERIOD"    yaml:"quiet_period"`
-	MaxTTL         Duration `envconfig:"MAX_TTL"         yaml:"max_ttl"`
-	SweepInterval  Duration `envconfig:"SWEEP_INTERVAL"  yaml:"sweep_interval"`
+	ValkeyAddr          string   `envconfig:"VALKEY_ADDR"            yaml:"valkey_addr"`
+	ValkeyDB            int      `envconfig:"VALKEY_DB"              yaml:"valkey_db"`
+	ValkeyPassword      string   `envconfig:"VALKEY_PASSWORD"        yaml:"-"`
+	QuietPeriod         Duration `envconfig:"QUIET_PERIOD"           yaml:"quiet_period"`
+	MaxTTL              Duration `envconfig:"MAX_TTL"                yaml:"max_ttl"`
+	SweepInterval       Duration `envconfig:"SWEEP_INTERVAL"         yaml:"sweep_interval"`
+	SweepWorkerPoolSize int      `envconfig:"SWEEP_WORKER_POOL_SIZE" yaml:"sweep_worker_pool_size"`
 }
 
 // Emitter configures the GreptimeDB ingester.
@@ -141,6 +143,9 @@ func (b *Buffer) validate() []error {
 	if b.SweepInterval.Duration() <= 0 {
 		errs = append(errs, errors.New("buffer.sweep_interval must be > 0"))
 	}
+	if b.SweepWorkerPoolSize <= 0 {
+		errs = append(errs, errors.New("buffer.sweep_worker_pool_size must be > 0"))
+	}
 	if b.MaxTTL.Duration() > 0 && b.QuietPeriod.Duration() > 0 &&
 		b.MaxTTL.Duration() <= b.QuietPeriod.Duration() {
 		errs = append(errs, errors.New("buffer.max_ttl must be greater than buffer.quiet_period"))
@@ -206,12 +211,13 @@ func defaults() Config {
 			OTLPHTTPEndpoint: "0.0.0.0:4318",
 		},
 		Buffer: Buffer{
-			ValkeyAddr:     "localhost:6379",
-			ValkeyDB:       0,
-			ValkeyPassword: "",
-			QuietPeriod:    Duration(defaultQuietPeriod),
-			MaxTTL:         Duration(defaultMaxTTL),
-			SweepInterval:  Duration(defaultSweepInterval),
+			ValkeyAddr:          "localhost:6379",
+			ValkeyDB:            0,
+			ValkeyPassword:      "",
+			QuietPeriod:         Duration(defaultQuietPeriod),
+			MaxTTL:              Duration(defaultMaxTTL),
+			SweepInterval:       Duration(defaultSweepInterval),
+			SweepWorkerPoolSize: runtime.NumCPU(),
 		},
 		Emitter: Emitter{
 			GreptimeDBEndpoint: "greptimedb:4001",
