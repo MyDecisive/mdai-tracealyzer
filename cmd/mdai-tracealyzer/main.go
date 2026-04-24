@@ -185,9 +185,10 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 
 	shutdownErr := gracefulShutdown(shutdownCtx, errCh, remaining, &probeWG, logger, adminServer, grpcServer, httpServer)
 
-	// Wait for the sweeper's in-flight tick before closing the emitter, so a
-	// late Emit does not land after the queue has begun draining.
-	sweeperWG.Wait()
+	// Wait for the sweeper's in-flight tick before closing the emitter so a
+	// late Emit cannot land after the queue starts draining; bounded by
+	// shutdownCtx so a stalled Drain cannot block exit past the grace.
+	waitForSweeper(shutdownCtx, &sweeperWG, logger)
 	if err := emitter.Close(shutdownCtx); err != nil {
 		logger.Warn("close emitter", zap.Error(err))
 	}
@@ -297,6 +298,19 @@ func gracefulShutdown(ctx context.Context, errCh <-chan serveResult, n int, prob
 	waitForServers(ctx, errCh, n, logger)
 	probeWG.Wait()
 	return err
+}
+
+func waitForSweeper(ctx context.Context, wg *sync.WaitGroup, logger *zap.Logger) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		logger.Warn("timed out waiting for sweeper shutdown", zap.Error(ctx.Err()))
+	}
 }
 
 func waitForServers(ctx context.Context, errCh <-chan serveResult, n int, logger *zap.Logger) {

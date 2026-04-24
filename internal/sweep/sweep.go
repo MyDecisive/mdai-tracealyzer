@@ -106,17 +106,15 @@ func (s *Sweeper) Run(ctx context.Context) error {
 }
 
 func (s *Sweeper) tick(parent context.Context) {
-	// Run the tick to completion even if parent cancels mid-flight: once Drain
-	// removes state from Valkey, the row must reach Emit. Run() still exits
-	// promptly because it only re-selects on ctx.Done after tick returns.
-	ctx := context.WithoutCancel(parent)
-
 	now := s.now()
 	quietCutoff := now.Add(-s.cfg.QuietPeriod)
 	ttlCutoff := now.Add(-s.cfg.MaxTTL)
 
-	finalizable, err := s.buf.Scan(ctx, quietCutoff, ttlCutoff)
+	finalizable, err := s.buf.Scan(parent, quietCutoff, ttlCutoff)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		s.metrics.incSweep(resultScanError)
 		s.logger.Warn("sweep: scan", zap.Error(err))
 		return
@@ -127,6 +125,9 @@ func (s *Sweeper) tick(parent context.Context) {
 	}
 	s.logger.Debug("sweep: finalizable found", zap.Int("count", len(finalizable)))
 
+	// Drain deletes state from Valkey; the resulting row must reach Emit even
+	// if parent cancels mid-phase.
+	ctx := context.WithoutCancel(parent)
 	rows := s.fanout(ctx, finalizable)
 
 	if len(rows) == 0 {

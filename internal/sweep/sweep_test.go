@@ -22,6 +22,7 @@ type fakeBuffer struct {
 	scanErr    error
 	drainSpans map[[16]byte]map[string]buffer.SpanRecord
 	drainErrs  map[[16]byte]error
+	onScan     func()
 
 	mu          sync.Mutex
 	scanCalls   int
@@ -41,7 +42,11 @@ func (f *fakeBuffer) Scan(ctx context.Context, quietCutoff, ttlCutoff time.Time)
 	f.mu.Lock()
 	f.scanCalls++
 	f.scanCutoffs = append(f.scanCutoffs, scanArgs{quietCutoff, ttlCutoff})
+	onScan := f.onScan
 	f.mu.Unlock()
+	if onScan != nil {
+		onScan()
+	}
 	if f.scanErr != nil {
 		return nil, f.scanErr
 	}
@@ -491,20 +496,45 @@ func (g *gatingComputer) Compute(_ [16]byte, _ string, _ map[string]buffer.SpanR
 	return topology.RootMetrics{}, 0, nil
 }
 
-// TestSweeper_TickRunsToCompletionOnCancel verifies that a parent-ctx cancel
-// does not abort work already in flight: once a tick starts, Scan and Drain
-// must run against a ctx that ignores the cancel, so a post-Drain row always
-// reaches Emit. The outer Run loop still exits on cancel because it re-selects
-// on ctx.Done only after the tick returns.
-func TestSweeper_TickRunsToCompletionOnCancel(t *testing.T) {
+func TestSweeper_Tick_CancelBeforeScan_IsBenignSkip(t *testing.T) {
+	t.Parallel()
+
+	buf := &fakeBuffer{}
+	comp := &fakeComputer{}
+	em := &fakeEmitter{}
+	s, m := newSweeperForTest(t, buf, comp, em)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.tick(ctx)
+
+	if len(buf.drainCalls) != 0 {
+		t.Fatalf("no Drain calls expected, got %d", len(buf.drainCalls))
+	}
+	if em.callCount() != 0 {
+		t.Fatalf("no Emit calls expected, got %d", em.callCount())
+	}
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultScanError)); got != 0 {
+		t.Fatalf("sweeps{scan_error}: want 0, got %v", got)
+	}
+	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 0 {
+		t.Fatalf("sweeps{ok}: want 0, got %v", got)
+	}
+}
+
+// TestSweeper_Tick_CancelAfterScan_CompletesDrainEmit: once Scan returns
+// finalizables, Drain's delete must still reach Emit even if parent cancels.
+func TestSweeper_Tick_CancelAfterScan_CompletesDrainEmit(t *testing.T) {
 	t.Parallel()
 
 	a := traceID(1)
+	ctx, cancel := context.WithCancel(context.Background())
 	buf := &fakeBuffer{
 		scanResult: []buffer.Finalizable{{TraceID: a, Trigger: buffer.TriggerQuiet}},
 		drainSpans: map[[16]byte]map[string]buffer.SpanRecord{
 			a: {"span-a": {TraceID: a}},
 		},
+		onScan: cancel,
 	}
 	comp := &fakeComputer{
 		results: map[[16]byte]computeResult{
@@ -514,8 +544,6 @@ func TestSweeper_TickRunsToCompletionOnCancel(t *testing.T) {
 	em := &fakeEmitter{}
 	s, m := newSweeperForTest(t, buf, comp, em)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	s.tick(ctx)
 
 	if buf.scanCalls != 1 {
