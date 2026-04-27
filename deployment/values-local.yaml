@@ -10,3 +10,6 @@ config:
     greptimedbDatabase: "public"
   service:
     logLevel: debug
+
+serviceMonitor:
+  enabled: false
