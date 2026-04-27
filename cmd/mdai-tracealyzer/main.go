@@ -19,6 +19,7 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/emit"
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
 	"github.com/mydecisive/mdai-tracealyzer/internal/observability"
+	"github.com/mydecisive/mdai-tracealyzer/internal/schema"
 	"github.com/mydecisive/mdai-tracealyzer/internal/sweep"
 	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
@@ -37,13 +38,14 @@ const (
 )
 
 var configPathFlag = flag.String("config", "", "path to tracealyzer YAML config")
+var migrateFlag = flag.Bool("migrate", false, "check and create required GreptimeDB schema objects, then exit")
 
 func main() {
 	flag.Parse()
-	os.Exit(mainExit(*configPathFlag))
+	os.Exit(mainExit(*configPathFlag, *migrateFlag))
 }
 
-func mainExit(configPath string) int {
+func mainExit(configPath string, migrate bool) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -59,6 +61,16 @@ func mainExit(configPath string) int {
 		return 1
 	}
 	defer func() { _ = logger.Sync() }()
+
+	if migrate {
+		manager := schema.New(cfg.Emitter, logger)
+		if err := manager.Migrate(ctx); err != nil {
+			logger.Error("schema migration failed", zap.Error(err))
+			return 1
+		}
+		logger.Info("schema migration completed")
+		return 0
+	}
 
 	if err := run(ctx, cfg, logger); err != nil {
 		logger.Error("service failed", zap.Error(err))
@@ -108,6 +120,11 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		defer cancel()
 		_ = emitter.Close(closeCtx)
 	}()
+
+	schemaManager := schema.New(cfg.Emitter, logger)
+	if err := schemaManager.CheckReady(ctx); err != nil {
+		return fmt.Errorf("schema readiness: %w", err)
+	}
 
 	sweeper, err := sweep.New(valkeyBuffer, topologyComputer{}, emitter, sweep.Config{
 		QuietPeriod:    cfg.Buffer.QuietPeriod.Duration(),

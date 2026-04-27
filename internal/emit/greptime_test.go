@@ -13,7 +13,6 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
-	"google.golang.org/grpc/metadata"
 )
 
 type fakeSDKClient struct {
@@ -27,21 +26,13 @@ type fakeSDKClient struct {
 }
 
 type sdkWriteCall struct {
-	autoCreate string
-	table      string
+	table string
 }
 
 func (c *fakeSDKClient) Write(ctx context.Context, tables ...*table.Table) (*gpb.GreptimeResponse, error) {
-	md, _ := metadata.FromOutgoingContext(ctx)
-	autoCreate := ""
-	if vals := md.Get("x-greptime-hint-auto_create_table"); len(vals) > 0 {
-		autoCreate = vals[0]
-	}
-
 	name, _ := tables[0].GetName()
 	c.writes = append(c.writes, sdkWriteCall{
-		autoCreate: autoCreate,
-		table:      name,
+		table: name,
 	})
 
 	if len(c.errs) == 0 {
@@ -86,7 +77,7 @@ func (c *fakeSDKClient) nextResponse() *gpb.GreptimeResponse {
 	return resp
 }
 
-func TestGreptimeWriterAlwaysUsesAutoCreateTable(t *testing.T) {
+func TestGreptimeWriterWritesConfiguredTable(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeSDKClient{}
@@ -101,9 +92,6 @@ func TestGreptimeWriterAlwaysUsesAutoCreateTable(t *testing.T) {
 
 	if len(client.writes) != 1 {
 		t.Fatalf("want 1 write attempt, got %d", len(client.writes))
-	}
-	if client.writes[0].autoCreate != "true" {
-		t.Fatalf("write auto_create_table = %q, want true", client.writes[0].autoCreate)
 	}
 	if client.writes[0].table != "trace_root_topology" {
 		t.Fatalf("write table = %q, want trace_root_topology", client.writes[0].table)

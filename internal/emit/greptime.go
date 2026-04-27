@@ -10,7 +10,6 @@ import (
 
 	gpb "github.com/GreptimeTeam/greptime-proto/go/greptime/v1"
 	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
-	gtcontext "github.com/GreptimeTeam/greptimedb-ingester-go/context"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table/types"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
@@ -133,7 +132,7 @@ func (w *greptimeWriter) Write(ctx context.Context, batch writeBatch) error {
 		return err
 	}
 
-	resp, err := w.client.Write(withAutoCreateHint(ctx, true), tbl)
+	resp, err := w.client.Write(ctx, tbl)
 	if err != nil {
 		return err
 	}
@@ -218,15 +217,6 @@ func timestampColumns() []columnDef {
 	return []columnDef{
 		{name: "timestamp", typ: types.TIMESTAMP_NANOSECOND},
 	}
-}
-
-func withAutoCreateHint(ctx context.Context, enabled bool) context.Context {
-	return gtcontext.New(ctx, gtcontext.WithHint([]*gtcontext.Hint{
-		{
-			Key:   "auto_create_table",
-			Value: strconv.FormatBool(enabled),
-		},
-	}))
 }
 
 func splitEndpoint(endpoint string) (string, int, error) {
