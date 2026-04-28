@@ -7,6 +7,7 @@ image:
 config:
   emitter:
     greptimedbEndpoint: "greptimedb-standalone.mdai.svc.cluster.local:4001"
+    greptimedbSqlEndpoint: "greptimedb-standalone.mdai.svc.cluster.local:4003"
     greptimedbDatabase: "public"
   service:
     logLevel: debug
