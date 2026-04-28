@@ -368,6 +368,7 @@ func sampleRows(n int) []topology.RootMetrics {
 func testEmitterConfig() config.Emitter {
 	return config.Emitter{
 		TableName:      "trace_root_topology",
+		TableTTL:       "14d",
 		Timeout:        config.Duration(time.Second),
 		MaxRetries:     2,
 		InitialBackoff: config.Duration(time.Millisecond),

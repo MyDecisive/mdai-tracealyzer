@@ -2,18 +2,16 @@ package schema
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 
-	gpb "github.com/GreptimeTeam/greptime-proto/go/greptime/v1"
-	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
-	"github.com/GreptimeTeam/greptimedb-ingester-go/options"
-	"github.com/GreptimeTeam/greptimedb-ingester-go/request/header"
+	_ "github.com/lib/pq"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"go.uber.org/zap"
-	"google.golang.org/grpc"
 )
 
 const (
@@ -23,22 +21,6 @@ const (
 )
 
 const (
-	createSourceTableSQL = `CREATE TABLE IF NOT EXISTS trace_root_topology (
-  "timestamp"         TIMESTAMP(9) TIME INDEX,
-  root_id           STRING,
-  trace_id          STRING,
-  root_service      STRING,
-  root_operation    STRING,
-  breadth           INT,
-  service_hop_depth INT,
-  service_count     INT,
-  operation_count   INT,
-  span_count        INT,
-  error_count       INT,
-  root_duration_ns  BIGINT,
-  PRIMARY KEY (root_id, trace_id)
-)`
-
 	createSinkTableSQL = `CREATE TABLE IF NOT EXISTS trace_root_topology_1m (
   time_window       TIMESTAMP(9) TIME INDEX,
   root_id           STRING,
@@ -62,23 +44,28 @@ SELECT
   count(*)                                      AS trace_count,
   sum(error_count)                              AS error_count_total
 FROM trace_root_topology
-WHERE timestamp >= now() - INTERVAL '2 minutes'
-  AND timestamp <  now() - INTERVAL '1 minute'
 GROUP BY time_window, root_id`
 )
 
-type sqlClient interface {
-	HealthCheck(ctx context.Context) (*gpb.HealthCheckResponse, error)
-	Handle(ctx context.Context, req *gpb.GreptimeRequest) (*gpb.GreptimeResponse, error)
+type rowSet interface {
+	Close() error
+	Next() bool
+	Err() error
+}
+
+type sqlConn interface {
+	PingContext(ctx context.Context) error
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (rowSet, error)
 	Close() error
 }
 
-type sqlFactory func(*greptime.Config) (sqlClient, error)
+type opener func(dsn string) (sqlConn, error)
 
 type Manager struct {
-	cfg     config.Emitter
-	logger  *zap.Logger
-	factory sqlFactory
+	cfg    config.Emitter
+	logger *zap.Logger
+	open   opener
 }
 
 func New(cfg config.Emitter, logger *zap.Logger) *Manager {
@@ -88,22 +75,20 @@ func New(cfg config.Emitter, logger *zap.Logger) *Manager {
 	return &Manager{
 		cfg:    cfg,
 		logger: logger,
-		factory: func(clientCfg *greptime.Config) (sqlClient, error) {
-			return newSQLClient(clientCfg)
-		},
+		open:   openPostgresDB,
 	}
 }
 
 func (m *Manager) Migrate(ctx context.Context) error {
-	client, err := m.connect(ctx)
+	conn, err := m.connect(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = client.Close() }()
+	defer func() { _ = conn.Close() }()
 
-	for _, stmt := range migrationStatements() {
+	for _, stmt := range migrationStatements(m.cfg) {
 		m.logger.Info("apply schema statement", zap.String("object", stmt.name))
-		if err := execSQL(ctx, client, stmt.sql); err != nil {
+		if err := execStatement(ctx, conn, stmt.sql); err != nil {
 			return fmt.Errorf("apply %s: %w", stmt.name, err)
 		}
 	}
@@ -111,15 +96,15 @@ func (m *Manager) Migrate(ctx context.Context) error {
 }
 
 func (m *Manager) CheckReady(ctx context.Context) error {
-	client, err := m.connect(ctx)
+	conn, err := m.connect(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = client.Close() }()
+	defer func() { _ = conn.Close() }()
 
 	for _, stmt := range readinessStatements() {
 		m.logger.Info("check schema object", zap.String("object", stmt.name))
-		if err := execSQL(ctx, client, stmt.sql); err != nil {
+		if err := queryStatement(ctx, conn, stmt.sql); err != nil {
 			return fmt.Errorf("check %s: %w", stmt.name, err)
 		}
 	}
@@ -131,9 +116,9 @@ type statement struct {
 	sql  string
 }
 
-func migrationStatements() []statement {
+func migrationStatements(cfg config.Emitter) []statement {
 	return []statement{
-		{name: sourceTableName, sql: createSourceTableSQL},
+		{name: sourceTableName, sql: createSourceTableSQL(cfg.TableTTL)},
 		{name: sinkTableName, sql: createSinkTableSQL},
 		{name: flowName, sql: createFlowSQL},
 	}
@@ -141,99 +126,103 @@ func migrationStatements() []statement {
 
 func readinessStatements() []statement {
 	return []statement{
-		{name: sourceTableName, sql: fmt.Sprintf("DESC TABLE %s", sourceTableName)},
-		{name: sinkTableName, sql: fmt.Sprintf("DESC TABLE %s", sinkTableName)},
-		{name: flowName, sql: fmt.Sprintf("DESC FLOW %s", flowName)},
+		{name: sourceTableName, sql: fmt.Sprintf("SHOW CREATE TABLE %s", sourceTableName)},
+		{name: sinkTableName, sql: fmt.Sprintf("SHOW CREATE TABLE %s", sinkTableName)},
+		{name: flowName, sql: fmt.Sprintf("SHOW CREATE FLOW %s", flowName)},
 	}
 }
 
-func (m *Manager) connect(ctx context.Context) (sqlClient, error) {
-	host, port, err := splitEndpoint(m.cfg.GreptimeDBEndpoint)
+func createSourceTableSQL(ttl string) string {
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS trace_root_topology (
+  "timestamp"       TIMESTAMP(9) TIME INDEX,
+  root_id           STRING,
+  trace_id          STRING,
+  root_service      STRING,
+  root_operation    STRING,
+  breadth           INT,
+  service_hop_depth INT,
+  service_count     INT,
+  operation_count   INT,
+  span_count        INT,
+  error_count       INT,
+  root_duration_ns  BIGINT,
+  PRIMARY KEY (root_id, trace_id)
+) WITH (ttl='%s')`, ttl)
+}
+
+func (m *Manager) connect(ctx context.Context) (sqlConn, error) {
+	dsn, err := buildPostgresDSN(m.cfg)
 	if err != nil {
-		return nil, fmt.Errorf("parse greptimedb endpoint: %w", err)
+		return nil, err
 	}
 
-	username, password := parseAuth(m.cfg.GreptimeDBAuth)
-	clientCfg := greptime.NewConfig(host).
-		WithPort(port).
-		WithDatabase(m.cfg.GreptimeDBDatabase).
-		WithAuth(username, password)
-
-	client, err := m.factory(clientCfg)
+	conn, err := m.open(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("create greptimedb client: %w", err)
+		return nil, fmt.Errorf("open greptimedb sql client: %w", err)
 	}
 
 	healthCtx, cancel := context.WithTimeout(ctx, m.cfg.Timeout.Duration())
 	defer cancel()
-	if _, err := client.HealthCheck(healthCtx); err != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("health check greptimedb: %w", err)
+	if err := conn.PingContext(healthCtx); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("ping greptimedb sql endpoint: %w", err)
 	}
-	return client, nil
+	return conn, nil
 }
 
-func execSQL(ctx context.Context, client sqlClient, sql string) error {
-	req := &gpb.GreptimeRequest{
-		Request: &gpb.GreptimeRequest_Query{
-			Query: &gpb.QueryRequest{
-				Query: &gpb.QueryRequest_Sql{Sql: sql},
-			},
-		},
-	}
-	resp, err := client.Handle(ctx, req)
+func execStatement(ctx context.Context, conn sqlConn, query string) error {
+	_, err := conn.ExecContext(ctx, query)
+	return err
+}
+
+func queryStatement(ctx context.Context, conn sqlConn, query string) error {
+	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
 		return err
 	}
-	status := resp.GetHeader().GetStatus()
-	if status.GetStatusCode() == 0 {
-		return nil
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		break
 	}
-	return fmt.Errorf("status_code=%d err_msg=%q", status.GetStatusCode(), status.GetErrMsg())
+	return rows.Err()
 }
 
-type grpcSQLClient struct {
-	conn   *grpc.ClientConn
-	db     gpb.GreptimeDatabaseClient
-	health gpb.HealthCheckClient
-	header *gpb.RequestHeader
+type sqlDB struct {
+	*sql.DB
 }
 
-func newSQLClient(cfg *greptime.Config) (sqlClient, error) {
-	conn, err := grpc.NewClient(
-		fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		options.NewUserAgentOption("schema").Build(),
-		options.NewTlsOption(true).Build(),
-	)
+func (db sqlDB) QueryContext(ctx context.Context, query string, args ...any) (rowSet, error) {
+	return db.DB.QueryContext(ctx, query, args...)
+}
+
+func openPostgresDB(dsn string) (sqlConn, error) {
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, err
 	}
+	return sqlDB{DB: db}, nil
+}
 
-	header_, err := header.New(cfg.Database).WithAuth(cfg.Username, cfg.Password).Build()
+func buildPostgresDSN(cfg config.Emitter) (string, error) {
+	host, port, err := splitEndpoint(cfg.GreptimeDBSqlEndpoint)
 	if err != nil {
-		_ = conn.Close()
-		return nil, err
+		return "", fmt.Errorf("parse greptimedb sql endpoint: %w", err)
 	}
 
-	return &grpcSQLClient{
-		conn:   conn,
-		db:     gpb.NewGreptimeDatabaseClient(conn),
-		health: gpb.NewHealthCheckClient(conn),
-		header: header_,
-	}, nil
-}
+	username, password := parseAuth(cfg.GreptimeDBAuth)
+	u := &url.URL{
+		Scheme: "postgres",
+		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+		Path:   "/" + cfg.GreptimeDBDatabase,
+	}
+	if username != "" || password != "" {
+		u.User = url.UserPassword(username, password)
+	}
 
-func (c *grpcSQLClient) HealthCheck(ctx context.Context) (*gpb.HealthCheckResponse, error) {
-	return c.health.HealthCheck(ctx, &gpb.HealthCheckRequest{})
-}
-
-func (c *grpcSQLClient) Handle(ctx context.Context, req *gpb.GreptimeRequest) (*gpb.GreptimeResponse, error) {
-	req.Header = c.header
-	return c.db.Handle(ctx, req)
-}
-
-func (c *grpcSQLClient) Close() error {
-	return c.conn.Close()
+	q := u.Query()
+	q.Set("sslmode", "disable")
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 func splitEndpoint(endpoint string) (string, int, error) {

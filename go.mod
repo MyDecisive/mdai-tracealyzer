@@ -6,6 +6,7 @@ require (
 	github.com/GreptimeTeam/greptime-proto v0.15.0
 	github.com/GreptimeTeam/greptimedb-ingester-go v0.7.1
 	github.com/kelseyhightower/envconfig v1.4.0
+	github.com/lib/pq v1.10.9
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/valkey-io/valkey-go v1.0.74

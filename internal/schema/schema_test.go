@@ -2,48 +2,67 @@ package schema
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
-	gpb "github.com/GreptimeTeam/greptime-proto/go/greptime/v1"
-	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"go.uber.org/zap"
 )
 
-type fakeSQLClient struct {
-	healthErr  error
-	handleErrs []error
-	requests   []string
-	closed     bool
+type fakeRows struct {
+	closed bool
 }
 
-func (c *fakeSQLClient) HealthCheck(context.Context) (*gpb.HealthCheckResponse, error) {
-	if c.healthErr != nil {
-		return nil, c.healthErr
-	}
-	return &gpb.HealthCheckResponse{}, nil
+func (r *fakeRows) Close() error {
+	r.closed = true
+	return nil
 }
 
-func (c *fakeSQLClient) Handle(_ context.Context, req *gpb.GreptimeRequest) (*gpb.GreptimeResponse, error) {
-	c.requests = append(c.requests, req.GetQuery().GetSql())
-	if len(c.handleErrs) > 0 {
-		err := c.handleErrs[0]
-		c.handleErrs = c.handleErrs[1:]
+func (*fakeRows) Next() bool { return false }
+
+func (*fakeRows) Err() error { return nil }
+
+type fakeSQLConn struct {
+	pingErr   error
+	execErrs  []error
+	queryErrs []error
+	execs     []string
+	queries   []string
+	closed    bool
+}
+
+func (c *fakeSQLConn) PingContext(context.Context) error {
+	return c.pingErr
+}
+
+func (c *fakeSQLConn) ExecContext(_ context.Context, query string, _ ...any) (sql.Result, error) {
+	c.execs = append(c.execs, query)
+	if len(c.execErrs) > 0 {
+		err := c.execErrs[0]
+		c.execErrs = c.execErrs[1:]
 		if err != nil {
 			return nil, err
 		}
 	}
-	return &gpb.GreptimeResponse{
-		Header: &gpb.ResponseHeader{
-			Status: &gpb.Status{},
-		},
-	}, nil
+	return nil, nil
 }
 
-func (c *fakeSQLClient) Close() error {
+func (c *fakeSQLConn) QueryContext(_ context.Context, query string, _ ...any) (rowSet, error) {
+	c.queries = append(c.queries, query)
+	if len(c.queryErrs) > 0 {
+		err := c.queryErrs[0]
+		c.queryErrs = c.queryErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &fakeRows{}, nil
+}
+
+func (c *fakeSQLConn) Close() error {
 	c.closed = true
 	return nil
 }
@@ -51,75 +70,73 @@ func (c *fakeSQLClient) Close() error {
 func TestManagerMigrateAppliesStatementsInOrder(t *testing.T) {
 	t.Parallel()
 
-	client := &fakeSQLClient{}
-	m := testManager(client)
+	conn := &fakeSQLConn{}
+	m := testManager(conn)
 
 	if err := m.Migrate(context.Background()); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	want := []string{createSourceTableSQL, createSinkTableSQL, createFlowSQL}
-	if len(client.requests) != len(want) {
-		t.Fatalf("want %d requests, got %d", len(want), len(client.requests))
+	want := []string{createSourceTableSQL("14d"), createSinkTableSQL, createFlowSQL}
+	if len(conn.execs) != len(want) {
+		t.Fatalf("want %d statements, got %d", len(want), len(conn.execs))
 	}
 	for i := range want {
-		if client.requests[i] != want[i] {
-			t.Fatalf("request %d mismatch\nwant: %q\n got: %q", i, want[i], client.requests[i])
+		if conn.execs[i] != want[i] {
+			t.Fatalf("statement %d mismatch\nwant: %q\n got: %q", i, want[i], conn.execs[i])
 		}
 	}
-	if !client.closed {
-		t.Fatal("expected client close")
+	if !conn.closed {
+		t.Fatal("expected connection close")
 	}
 }
 
 func TestManagerCheckReadyChecksAllObjects(t *testing.T) {
 	t.Parallel()
 
-	client := &fakeSQLClient{}
-	m := testManager(client)
+	conn := &fakeSQLConn{}
+	m := testManager(conn)
 
 	if err := m.CheckReady(context.Background()); err != nil {
 		t.Fatalf("CheckReady: %v", err)
 	}
 	want := []string{
-		"DESC TABLE trace_root_topology",
-		"DESC TABLE trace_root_topology_1m",
-		"DESC FLOW trace_root_topology_1m_flow",
+		"SHOW CREATE TABLE trace_root_topology",
+		"SHOW CREATE TABLE trace_root_topology_1m",
+		"SHOW CREATE FLOW trace_root_topology_1m_flow",
 	}
-	if len(client.requests) != len(want) {
-		t.Fatalf("want %d requests, got %d", len(want), len(client.requests))
+	if len(conn.queries) != len(want) {
+		t.Fatalf("want %d queries, got %d", len(want), len(conn.queries))
 	}
 	for i := range want {
-		if client.requests[i] != want[i] {
-			t.Fatalf("request %d mismatch\nwant: %q\n got: %q", i, want[i], client.requests[i])
+		if conn.queries[i] != want[i] {
+			t.Fatalf("query %d mismatch\nwant: %q\n got: %q", i, want[i], conn.queries[i])
 		}
 	}
 }
 
-func TestManagerConnectFailsOnHealthCheck(t *testing.T) {
+func TestManagerConnectFailsOnPing(t *testing.T) {
 	t.Parallel()
 
-	client := &fakeSQLClient{healthErr: errors.New("unreachable")}
-	m := testManager(client)
+	conn := &fakeSQLConn{pingErr: errors.New("unreachable")}
+	m := testManager(conn)
 
 	err := m.CheckReady(context.Background())
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "health check greptimedb") {
+	if !strings.Contains(err.Error(), "ping greptimedb sql endpoint") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !client.closed {
-		t.Fatal("expected client close on health check error")
+	if !conn.closed {
+		t.Fatal("expected connection close on ping error")
 	}
 }
 
 func TestManagerMigrateFailsOnStatementError(t *testing.T) {
 	t.Parallel()
 
-	client := &fakeSQLClient{
-		handleErrs: []error{nil, errors.New("ddl failed")},
-	}
-	m := testManager(client)
+	conn := &fakeSQLConn{execErrs: []error{nil, errors.New("ddl failed")}}
+	m := testManager(conn)
 
 	err := m.Migrate(context.Background())
 	if err == nil {
@@ -130,22 +147,37 @@ func TestManagerMigrateFailsOnStatementError(t *testing.T) {
 	}
 }
 
-func testManager(client *fakeSQLClient) *Manager {
+func TestBuildPostgresDSN(t *testing.T) {
+	t.Parallel()
+
+	dsn, err := buildPostgresDSN(testEmitterConfig())
+	if err != nil {
+		t.Fatalf("buildPostgresDSN: %v", err)
+	}
+	want := "postgres://mdai:secret@127.0.0.1:4003/mdai?sslmode=disable"
+	if dsn != want {
+		t.Fatalf("dsn = %q, want %q", dsn, want)
+	}
+}
+
+func testManager(conn *fakeSQLConn) *Manager {
 	return &Manager{
 		cfg:    testEmitterConfig(),
 		logger: zap.NewNop(),
-		factory: func(*greptime.Config) (sqlClient, error) {
-			return client, nil
+		open: func(string) (sqlConn, error) {
+			return conn, nil
 		},
 	}
 }
 
 func testEmitterConfig() config.Emitter {
 	return config.Emitter{
-		GreptimeDBEndpoint: "127.0.0.1:4001",
-		GreptimeDBDatabase: "mdai",
-		GreptimeDBAuth:     "mdai:secret",
-		Timeout:            config.Duration(5 * time.Second),
-		TableName:          "trace_root_topology",
+		GreptimeDBEndpoint:    "127.0.0.1:4001",
+		GreptimeDBSqlEndpoint: "127.0.0.1:4003",
+		GreptimeDBDatabase:    "mdai",
+		GreptimeDBAuth:        "mdai:secret",
+		Timeout:               config.Duration(5 * time.Second),
+		TableName:             "trace_root_topology",
+		TableTTL:              "14d",
 	}
 }
