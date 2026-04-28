@@ -4,13 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
 	"net/url"
-	"strconv"
-	"strings"
 
 	_ "github.com/lib/pq"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
+	"github.com/mydecisive/mdai-tracealyzer/internal/greptimecfg"
 	"go.uber.org/zap"
 )
 
@@ -204,15 +202,15 @@ func openPostgresDB(dsn string) (sqlConn, error) {
 }
 
 func buildPostgresDSN(cfg config.Emitter) (string, error) {
-	host, port, err := splitEndpoint(cfg.GreptimeDBSqlEndpoint)
+	host, port, err := greptimecfg.SplitEndpoint(cfg.GreptimeDBSqlEndpoint)
 	if err != nil {
 		return "", fmt.Errorf("parse greptimedb sql endpoint: %w", err)
 	}
 
-	username, password := parseAuth(cfg.GreptimeDBAuth)
+	username, password := greptimecfg.ParseAuth(cfg.GreptimeDBAuth)
 	u := &url.URL{
 		Scheme: "postgres",
-		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+		Host:   fmt.Sprintf("%s:%d", host, port),
 		Path:   "/" + cfg.GreptimeDBDatabase,
 	}
 	if username != "" || password != "" {
@@ -223,26 +221,4 @@ func buildPostgresDSN(cfg config.Emitter) (string, error) {
 	q.Set("sslmode", "disable")
 	u.RawQuery = q.Encode()
 	return u.String(), nil
-}
-
-func splitEndpoint(endpoint string) (string, int, error) {
-	host, portStr, err := net.SplitHostPort(endpoint)
-	if err != nil {
-		return "", 0, err
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return "", 0, fmt.Errorf("port %q: %w", portStr, err)
-	}
-	return host, port, nil
-}
-
-func parseAuth(raw string) (string, string) {
-	if raw == "" {
-		return "", ""
-	}
-	if user, pass, ok := strings.Cut(raw, ":"); ok {
-		return user, pass
-	}
-	return "", raw
 }

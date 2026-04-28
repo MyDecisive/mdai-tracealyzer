@@ -175,7 +175,7 @@ func testEmitterConfig() config.Emitter {
 		GreptimeDBEndpoint:    "127.0.0.1:4001",
 		GreptimeDBSqlEndpoint: "127.0.0.1:4003",
 		GreptimeDBDatabase:    "mdai",
-		GreptimeDBAuth:        "mdai:secret",
+		GreptimeDBAuth:        "mdai=secret",
 		Timeout:               config.Duration(5 * time.Second),
 		TableName:             "trace_root_topology",
 		TableTTL:              "14d",
