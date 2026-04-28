@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
-	"log"
 	"net"
 
-	"github.com/vika/global_ratio_mode/test-stand/demo/internal/common"
-	"github.com/vika/global_ratio_mode/test-stand/demo/internal/pb"
+	"github.com/mydecisive/mdai-tracealyzer/test-stand/demo/internal/common"
+	"github.com/mydecisive/mdai-tracealyzer/test-stand/demo/internal/pb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type inventoryServer struct {
@@ -54,6 +55,18 @@ func (s *inventoryServer) ReserveItems(ctx context.Context, req *pb.InventoryReq
 		"transport":   "grpc",
 		"grpc.method": "InventoryService/ReserveItems",
 	})
+
+	if scenario == "checkout-grpc-error" {
+		s.logger.Info(ctx, "request failed", map[string]any{
+			"event":       "request_failed",
+			"request_id":  requestID,
+			"scenario":    scenario,
+			"transport":   "grpc",
+			"grpc.method": "InventoryService/ReserveItems",
+			"grpc.code":   codes.Internal.String(),
+		})
+		return nil, status.Error(codes.Internal, "inventory reservation failed")
+	}
 
 	reply := &pb.InventoryReply{
 		RequestId:     requestID,
@@ -104,21 +117,13 @@ func (s *inventoryServer) ReleaseReservation(ctx context.Context, req *pb.Releas
 	return reply, nil
 }
 
-func main() {
-	service := common.Getenv("DD_SERVICE", "inventory-grpc-service")
-	stopTracer := common.StartTracer(service)
-	defer stopTracer()
-
-	logger := common.NewLogger(service)
+func runInventoryGRPC(service string, logger *common.Logger) error {
 	server := common.NewGRPCServer(service)
 	pb.RegisterInventoryServiceServer(server, &inventoryServer{logger: logger})
 
 	listener, err := net.Listen("tcp", ":"+common.Getenv("GRPC_PORT", "50051"))
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-
-	if err := server.Serve(listener); err != nil {
-		log.Fatal(err)
-	}
+	return server.Serve(listener)
 }

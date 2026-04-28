@@ -12,6 +12,8 @@ The service does not make the sampling decision itself, store full trace data, r
 
 The `test-stand/` tree exercises the upstream side — a Datadog agent plus a handful of demo microservices that emit realistic traces. The flow is: demo services → Datadog agent → OTel collector gateway (kind) → tracealyzer (kind).
 
+Every demo container (catalog, checkout, gateway, payments, inventory-http, inventory-grpc, notifier) is one role of a single `demo-svc` binary; compose runs it seven times with distinct `DEMO_ROLE` and `DD_SERVICE` env vars. Adding a new role means a new `cmd/demo-svc/role_<name>.go` plus a compose entry — no new module to wire.
+
 ### One-time setup
 
 ```sh
@@ -43,7 +45,7 @@ Then in a fourth terminal:
 # Bring up the demo services (Datadog agent + catalog/checkout/inventory/...).
 make demo-up
 
-# Emit a scenario.
+# Emit a scenario — curls gateway-api directly via the host port published by compose.
 make demo-emit DEMO_SCENARIO=browse
 ```
 
@@ -51,14 +53,46 @@ make demo-emit DEMO_SCENARIO=browse
 
 | Scenario | What it exercises |
 |---|---|
-| `browse` | Catalog browse — shallow trace, single service |
+| `browse` | Catalog browse — shallow trace, single downstream hop |
 | `inventory-http` | Inventory lookup over HTTP |
 | `inventory-grpc` | Inventory lookup over gRPC |
 | `checkout-http` | Full checkout flow over HTTP, no rollback |
 | `checkout-grpc` | Full checkout flow over gRPC, no rollback |
-| `checkout-rollback-grpc` | Checkout over gRPC with rollback — error path, deepest service graph |
+| `checkout-rollback-grpc` | Checkout over gRPC with rollback — saga shape with three-way fan-out from checkout |
+| `checkout-http-error` | Checkout over HTTP where payments returns 500 — exercises `error_count` on the HTTP path |
+| `checkout-grpc-error` | Checkout over gRPC where inventory `ReserveItems` returns `codes.Internal` — exercises `error_count` on the gRPC path |
+| `wide` | Gateway fans out concurrently to catalog, inventory-http, inventory-grpc, and payments — pushes `breadth` past 3 |
+| `deep` | gateway → checkout → inventory-http → catalog — pushes `service_hop_depth` to 4 |
+| `checkout-async-joined` | Checkout publishes to Kafka (trace context is always injected into headers); notifier consumes asynchronously, extracts the context, and joins the same trace — exercises messaging-derived operations on a non-root span and tests quiet-period accumulation across late-arriving spans. |
+| `checkout-async-detached` | Same producer behavior as `joined` — headers carry trace context. The detached flag instructs the notifier consumer to **skip extraction**, so its span becomes a new root with a `messaging.operation.type=process` operation — exercises messaging-derived operations on a root span. |
+| `catalog-db` | Gateway → catalog (HTTP) → Postgres `SELECT items` (CLIENT span with `db.system=postgresql`) — exercises operation derivation on non-HTTP/non-gRPC/non-messaging CLIENT spans (the §4.2 fallback path). |
+| `browse-cached` | Gateway hits Redis directly with `GET catalog:items` before falling through to catalog — same `db.system` fallback path on a different system; cache miss adds `redis.set` and an HTTP catalog hop, hit emits a single `redis.get` CLIENT span. |
 
-Start with `browse` to confirm basic span ingestion, then use `checkout-rollback-grpc` to stress topology computation with error spans.
+Start with `browse` to confirm basic span ingestion, then use `checkout-rollback-grpc`, `checkout-grpc-error`, `wide`, `deep`, and `checkout-async-detached` to stress different topology dimensions.
+
+### Continuous load
+
+A `load-generator` service is included in the compose stack behind a `load` profile so it stays off by default. It hits `gateway-api` on a configurable interval with a weighted-random scenario mix.
+
+```sh
+make demo-load-up      # start
+make demo-load-logs    # tail
+make demo-load-down    # stop and remove
+```
+
+Tunables (env on the service in `test-stand/docker-compose.yaml`): `INTERVAL` (Go duration, default `1s`), `CONCURRENCY` (default `1`), `MIX` (`name:weight` pairs, comma-separated), `DURATION` (`0` = forever, otherwise a Go duration for bounded soak runs), `START_DELAY`, `GATEWAY_URL`. The default mix covers all fourteen scenarios with `wide` and `deep` doubled.
+
+### Messaging
+
+The default stack includes a Kafka broker (`apache/kafka` in KRaft mode) and a `notifier` consumer service so the messaging trace shapes are always exercisable. Producer instrumentation in `checkout-api` activates only when a request carries `notify=joined|detached`; other scenarios are unaffected.
+
+The producer and consumer wrappers in `internal/common/kafka.go` set `messaging.system=kafka`, `messaging.destination.name=<topic>`, and `messaging.operation.type=publish|process` on every span so tracealyzer's messaging operation derivation is exercised regardless of the upstream contrib's attribute conventions. The producer always injects trace context into Kafka headers via `ddtracer.Inject`. The detached vs joined distinction lives on the **consumer**: a `Detached` flag on `KafkaConsumerConfig` causes the consumer to skip `ddtracer.Extract`, so its span starts with no parent and becomes a new trace root.
+
+### Database and cache
+
+The default stack also includes a Postgres 16 instance (seeded from `test-stand/postgres/init.sql` with an `items` table) and a Redis 7 cache. The wrappers in `internal/common/db.go` and `internal/common/cache.go` annotate each query with `db.system`, `db.statement`, and `db.operation`, and emit `span.kind=client` with a generic span name (`postgres.query`, `redis.get`, `redis.set`). Operation derivation falls through to `span.Name()` for these spans, exercising the §4.2 fallback that no HTTP, gRPC, or messaging scenario reaches.
+
+Catalog connects via `POSTGRES_DSN` and serves Postgres-backed responses on `?source=db`. Gateway connects via `REDIS_ADDR` and uses the cache on `?cache=true`. Both env vars are wired in compose; service startup is gated on the Postgres and Redis healthchecks so the demo apps don't crash-loop while the dependencies come up.
 
 ### Iterating on tracealyzer
 

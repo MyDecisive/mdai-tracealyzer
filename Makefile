@@ -12,7 +12,7 @@ GOTOOLCHAIN       ?= go1.25.0
 TEST_GATEWAY_NAME ?= datadog-agent-test-gateway
 TEST_GATEWAY_SAMPLE ?= collector-datadog-agent-test-gateway.yaml
 TEST_STAND_DIR    ?= test-stand
-DEMO_CONTROL_URL  ?= http://localhost:8081
+DEMO_GATEWAY_URL  ?= http://localhost:8081
 DEMO_SCENARIO     ?= browse
 
 KUBECTL               = kubectl --context=$(KUBECTL_CONTEXT) -n $(NAMESPACE)
@@ -35,7 +35,8 @@ endef
 	logs metrics-forward \
 	helm helm-package helm-publish status \
 	demo-deploy-gateway demo-delete-gateway demo-port-forward \
-	demo-up demo-down demo-emit demo-agent-logs demo-gateway-logs
+	demo-up demo-down demo-reset demo-emit demo-agent-logs demo-gateway-logs \
+	demo-load-up demo-load-down demo-load-logs
 
 build: tidy
 	$(GO) build -trimpath -ldflags="-w -s" -o mdai-tracealyzer ./cmd/mdai-tracealyzer
@@ -158,14 +159,45 @@ demo-up:
 demo-down:
 	$(COMPOSE) down --remove-orphans
 
+demo-reset:
+	$(COMPOSE) down -v --remove-orphans
+	$(COMPOSE) up --build -d
+
 demo-emit:
-	curl -sS -X POST $(DEMO_CONTROL_URL)/emit -H 'Content-Type: application/json' -d '{"scenario":"$(DEMO_SCENARIO)"}'
+	@case "$(DEMO_SCENARIO)" in \
+		browse) URL='/browse?scenario=browse';; \
+		inventory-http) URL='/inventory?transport=http&scenario=inventory-http';; \
+		inventory-grpc) URL='/inventory?transport=grpc&scenario=inventory-grpc';; \
+		checkout-http) URL='/checkout?transport=http&rollback=false&scenario=checkout-http';; \
+		checkout-grpc) URL='/checkout?transport=grpc&rollback=false&scenario=checkout-grpc';; \
+		checkout-rollback-grpc) URL='/checkout?transport=grpc&rollback=true&scenario=checkout-rollback-grpc';; \
+		checkout-http-error) URL='/checkout?transport=http&fail=true&scenario=checkout-http-error';; \
+		checkout-grpc-error) URL='/checkout?transport=grpc&scenario=checkout-grpc-error';; \
+		wide) URL='/wide?scenario=wide';; \
+		deep) URL='/deep?scenario=deep';; \
+		checkout-async-joined) URL='/checkout?transport=grpc&notify=joined&scenario=checkout-async-joined';; \
+		checkout-async-detached) URL='/checkout?transport=grpc&notify=detached&scenario=checkout-async-detached';; \
+		catalog-db) URL='/browse?source=db&scenario=catalog-db';; \
+		browse-cached) URL='/browse?cache=true&scenario=browse-cached';; \
+		*) echo "unknown scenario: $(DEMO_SCENARIO)"; exit 1;; \
+	esac; \
+	curl -sS "$(DEMO_GATEWAY_URL)$$URL"
 
 demo-gateway-logs:
 	$(KUBECTL) logs -l app=$(TEST_GATEWAY_NAME) --tail=200 -f
 
 demo-agent-logs:
 	$(COMPOSE) logs -f agent
+
+demo-load-up:
+	$(COMPOSE) --profile load up --build -d load-generator
+
+demo-load-down:
+	$(COMPOSE) stop load-generator
+	$(COMPOSE) rm -sf load-generator
+
+demo-load-logs:
+	$(COMPOSE) logs -f load-generator
 
 status:
 	$(KUBECTL) get opentelemetrycollectors

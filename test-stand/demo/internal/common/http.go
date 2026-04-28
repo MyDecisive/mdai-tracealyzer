@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	httptrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/net/http"
@@ -203,4 +204,27 @@ func JSONRequest(ctx context.Context, client *http.Client, logger *Logger, metho
 	})
 
 	return payload, nil
+}
+
+type CallResult struct {
+	Value any
+	Err   error
+}
+
+func ParallelCalls(ctx context.Context, calls map[string]func(context.Context) (any, error)) map[string]CallResult {
+	results := make(map[string]CallResult, len(calls))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for name, fn := range calls {
+		wg.Add(1)
+		go func(name string, fn func(context.Context) (any, error)) {
+			defer wg.Done()
+			value, err := fn(ctx)
+			mu.Lock()
+			results[name] = CallResult{Value: value, Err: err}
+			mu.Unlock()
+		}(name, fn)
+	}
+	wg.Wait()
+	return results
 }
