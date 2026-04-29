@@ -37,8 +37,10 @@ const (
 	numServers = 3
 )
 
-var configPathFlag = flag.String("config", "", "path to tracealyzer YAML config")
-var migrateFlag = flag.Bool("migrate", false, "check and create required GreptimeDB schema objects, then exit")
+var (
+	configPathFlag = flag.String("config", "", "path to tracealyzer YAML config")
+	migrateFlag    = flag.Bool("migrate", false, "check and create required GreptimeDB schema objects, then exit")
+)
 
 func main() {
 	flag.Parse()

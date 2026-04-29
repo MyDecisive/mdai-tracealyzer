@@ -55,17 +55,17 @@ type Buffer struct {
 
 // Emitter configures the GreptimeDB ingester.
 type Emitter struct {
-	GreptimeDBEndpoint    string   `envconfig:"GREPTIMEDB_ENDPOINT" yaml:"greptimedb_endpoint"`
+	GreptimeDBEndpoint    string   `envconfig:"GREPTIMEDB_ENDPOINT"     yaml:"greptimedb_endpoint"`
 	GreptimeDBSqlEndpoint string   `envconfig:"GREPTIMEDB_SQL_ENDPOINT" yaml:"greptimedb_sql_endpoint"`
-	GreptimeDBDatabase    string   `envconfig:"GREPTIMEDB_DATABASE" yaml:"greptimedb_database"`
-	GreptimeDBAuth        string   `envconfig:"GREPTIMEDB_AUTH"     yaml:"-"`
-	TableTTL              string   `envconfig:"TABLE_TTL"           yaml:"table_ttl"`
-	Timeout               Duration `envconfig:"TIMEOUT"             yaml:"timeout"`
-	MaxRetries            int      `envconfig:"MAX_RETRIES"         yaml:"max_retries"`
-	InitialBackoff        Duration `envconfig:"INITIAL_BACKOFF"     yaml:"initial_backoff"`
-	BatchSize             int      `envconfig:"BATCH_SIZE"          yaml:"batch_size"`
-	FlushInterval         Duration `envconfig:"FLUSH_INTERVAL"      yaml:"flush_interval"`
-	QueueCapacity         int      `envconfig:"QUEUE_CAPACITY"      yaml:"queue_capacity"`
+	GreptimeDBDatabase    string   `envconfig:"GREPTIMEDB_DATABASE"     yaml:"greptimedb_database"`
+	GreptimeDBAuth        string   `envconfig:"GREPTIMEDB_AUTH"         yaml:"-"`
+	TableTTL              string   `envconfig:"TABLE_TTL"               yaml:"table_ttl"`
+	Timeout               Duration `envconfig:"TIMEOUT"                 yaml:"timeout"`
+	MaxRetries            int      `envconfig:"MAX_RETRIES"             yaml:"max_retries"`
+	InitialBackoff        Duration `envconfig:"INITIAL_BACKOFF"         yaml:"initial_backoff"`
+	BatchSize             int      `envconfig:"BATCH_SIZE"              yaml:"batch_size"`
+	FlushInterval         Duration `envconfig:"FLUSH_INTERVAL"          yaml:"flush_interval"`
+	QueueCapacity         int      `envconfig:"QUEUE_CAPACITY"          yaml:"queue_capacity"`
 }
 
 // Service configures cross-cutting runtime settings.
