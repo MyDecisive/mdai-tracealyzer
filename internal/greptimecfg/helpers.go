@@ -7,6 +7,13 @@ import (
 	"strings"
 )
 
+const (
+	BaseName        = "trace_root_topology"
+	SourceTableName = BaseName
+	SinkTableName   = BaseName + "_1m"
+	FlowName        = BaseName + "_1m_flow"
+)
+
 func SplitEndpoint(endpoint string) (string, int, error) {
 	host, portStr, err := net.SplitHostPort(endpoint)
 	if err != nil {

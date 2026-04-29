@@ -137,7 +137,7 @@ The cluster contract once the service exists:
 Configuration is a YAML file overridable by environment variables:
 
 - YAML path: `/etc/tracealyzer/config.yaml` by default, or `--config <path>`.
-- Env-var naming: `TRACEALYZER_<SECTION>_<FIELD>` (e.g. `TRACEALYZER_BUFFER_VALKEY_ADDR`, `TRACEALYZER_SERVICE_LOG_LEVEL`).
+- Env-var naming: `<SECTION>_<FIELD>` (e.g. `BUFFER_VALKEY_ADDR`, `SERVICE_LOG_LEVEL`).
 - Every YAML field can be overridden by its corresponding env var.
 
 ### Env-only secrets
@@ -146,8 +146,8 @@ These are accepted **only** from environment variables; they are never read from
 
 | Variable                              | Purpose                                    |
 |---------------------------------------|--------------------------------------------|
-| `TRACEALYZER_BUFFER_VALKEY_PASSWORD`  | Valkey authentication.                     |
-| `TRACEALYZER_EMITTER_GREPTIMEDB_AUTH` | GreptimeDB ingester authentication token.  |
+| `BUFFER_VALKEY_PASSWORD`  | Valkey authentication.                     |
+| `EMITTER_GREPTIMEDB_AUTH` | GreptimeDB ingester authentication token.  |
 
 In Kubernetes deployments, inject both via a Secret. Do not commit them to `.env` files or the ConfigMap.
 

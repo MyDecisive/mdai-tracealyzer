@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	sourceTableName = "trace_root_topology"
-	sinkTableName   = "trace_root_topology_1m"
-	flowName        = "trace_root_topology_1m_flow"
+	sourceTableName = greptimecfg.SourceTableName
+	sinkTableName   = greptimecfg.SinkTableName
+	flowName        = greptimecfg.FlowName
 )
 
 const (
@@ -179,9 +179,7 @@ func queryStatement(ctx context.Context, conn sqlConn, query string) error {
 		return err
 	}
 	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		break
-	}
+	rows.Next()
 	return rows.Err()
 }
 

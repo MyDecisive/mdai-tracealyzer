@@ -53,12 +53,12 @@ spec:
               containerPort: {{ .Values.service.ports.metrics }}
               protocol: TCP
           env:
-            - name: TRACEALYZER_BUFFER_VALKEY_ADDR
+            - name: BUFFER_VALKEY_ADDR
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.valkeySecretName | quote }}
                   key: VALKEY_ENDPOINT
-            - name: TRACEALYZER_BUFFER_VALKEY_PASSWORD
+            - name: BUFFER_VALKEY_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.valkeySecretName | quote }}

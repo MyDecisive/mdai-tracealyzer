@@ -14,8 +14,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const envPrefix = "tracealyzer"
-
 const (
 	defaultQuietPeriod    = 60 * time.Second
 	defaultMaxTTL         = 10 * time.Minute
@@ -61,7 +59,6 @@ type Emitter struct {
 	GreptimeDBSqlEndpoint string   `envconfig:"GREPTIMEDB_SQL_ENDPOINT" yaml:"greptimedb_sql_endpoint"`
 	GreptimeDBDatabase    string   `envconfig:"GREPTIMEDB_DATABASE" yaml:"greptimedb_database"`
 	GreptimeDBAuth        string   `envconfig:"GREPTIMEDB_AUTH"     yaml:"-"`
-	TableName             string   `envconfig:"TABLE_NAME"          yaml:"table_name"`
 	TableTTL              string   `envconfig:"TABLE_TTL"           yaml:"table_ttl"`
 	Timeout               Duration `envconfig:"TIMEOUT"             yaml:"timeout"`
 	MaxRetries            int      `envconfig:"MAX_RETRIES"         yaml:"max_retries"`
@@ -97,7 +94,7 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
-	if err := envconfig.Process(envPrefix, &cfg); err != nil {
+	if err := envconfig.Process("", &cfg); err != nil {
 		return nil, fmt.Errorf("apply env overrides: %w", err)
 	}
 
@@ -167,9 +164,6 @@ func (e *Emitter) validate() []error {
 	if e.GreptimeDBDatabase == "" {
 		errs = append(errs, errors.New("emitter.greptimedb_database is required"))
 	}
-	if e.TableName == "" {
-		errs = append(errs, errors.New("emitter.table_name is required"))
-	}
 	if e.TableTTL == "" {
 		errs = append(errs, errors.New("emitter.table_ttl is required"))
 	} else if err := validateTTL(e.TableTTL); err != nil {
@@ -235,7 +229,6 @@ func defaults() Config {
 			GreptimeDBSqlEndpoint: "greptimedb:4003",
 			GreptimeDBDatabase:    "public",
 			GreptimeDBAuth:        "",
-			TableName:             "trace_root_topology",
 			TableTTL:              defaultTableTTL,
 			Timeout:               Duration(defaultEmitterTimeout),
 			MaxRetries:            defaultMaxRetries,

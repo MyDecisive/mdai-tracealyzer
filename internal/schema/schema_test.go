@@ -160,6 +160,22 @@ func TestBuildPostgresDSN(t *testing.T) {
 	}
 }
 
+func TestBuildPostgresDSN_EmptyAuth(t *testing.T) {
+	t.Parallel()
+
+	cfg := testEmitterConfig()
+	cfg.GreptimeDBAuth = ""
+
+	dsn, err := buildPostgresDSN(cfg)
+	if err != nil {
+		t.Fatalf("buildPostgresDSN: %v", err)
+	}
+	want := "postgres://127.0.0.1:4003/mdai?sslmode=disable"
+	if dsn != want {
+		t.Fatalf("dsn = %q, want %q", dsn, want)
+	}
+}
+
 func testManager(conn *fakeSQLConn) *Manager {
 	return &Manager{
 		cfg:    testEmitterConfig(),
@@ -177,7 +193,6 @@ func testEmitterConfig() config.Emitter {
 		GreptimeDBDatabase:    "mdai",
 		GreptimeDBAuth:        "mdai=secret",
 		Timeout:               config.Duration(5 * time.Second),
-		TableName:             "trace_root_topology",
 		TableTTL:              "14d",
 	}
 }

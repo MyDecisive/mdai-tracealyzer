@@ -30,7 +30,6 @@ func TestLoad_DefaultsWhenNoPath(t *testing.T) {
 	assertEqual(t, "greptimedb:4001", cfg.Emitter.GreptimeDBEndpoint)
 	assertEqual(t, "greptimedb:4003", cfg.Emitter.GreptimeDBSqlEndpoint)
 	assertEqual(t, "public", cfg.Emitter.GreptimeDBDatabase)
-	assertEqual(t, "trace_root_topology", cfg.Emitter.TableName)
 	assertEqual(t, "14d", cfg.Emitter.TableTTL)
 	assertEqual(t, 3, cfg.Emitter.MaxRetries)
 	assertDuration(t, 10*time.Second, cfg.Emitter.Timeout)
@@ -68,13 +67,13 @@ func TestLoad_YAMLOverridesDefaults(t *testing.T) {
 }
 
 func TestLoad_EnvOverridesYAML(t *testing.T) {
-	t.Setenv("TRACEALYZER_BUFFER_VALKEY_ADDR", "env-valkey:6379")
-	t.Setenv("TRACEALYZER_BUFFER_QUIET_PERIOD", "90s")
-	t.Setenv("TRACEALYZER_SERVICE_LOG_LEVEL", "warn")
-	t.Setenv("TRACEALYZER_EMITTER_MAX_RETRIES", "7")
-	t.Setenv("TRACEALYZER_EMITTER_QUEUE_CAPACITY", "512")
-	t.Setenv("TRACEALYZER_EMITTER_TABLE_TTL", "30d")
-	t.Setenv("TRACEALYZER_EMITTER_GREPTIMEDB_SQL_ENDPOINT", "env-greptime-sql:4003")
+	t.Setenv("BUFFER_VALKEY_ADDR", "env-valkey:6379")
+	t.Setenv("BUFFER_QUIET_PERIOD", "90s")
+	t.Setenv("SERVICE_LOG_LEVEL", "warn")
+	t.Setenv("EMITTER_MAX_RETRIES", "7")
+	t.Setenv("EMITTER_QUEUE_CAPACITY", "512")
+	t.Setenv("EMITTER_TABLE_TTL", "30d")
+	t.Setenv("EMITTER_GREPTIMEDB_SQL_ENDPOINT", "env-greptime-sql:4003")
 
 	cfg, err := config.Load(filepath.Join("testdata", "valid.yaml"))
 	if err != nil {
@@ -94,8 +93,8 @@ func TestLoad_SecretsOnlyFromEnv(t *testing.T) {
 	valkeyPassword := testEnvValue(t, "valkey")
 	greptimeAuth := testEnvValue(t, "greptime")
 
-	t.Setenv("TRACEALYZER_BUFFER_VALKEY_PASSWORD", valkeyPassword)
-	t.Setenv("TRACEALYZER_EMITTER_GREPTIMEDB_AUTH", greptimeAuth)
+	t.Setenv("BUFFER_VALKEY_PASSWORD", valkeyPassword)
+	t.Setenv("EMITTER_GREPTIMEDB_AUTH", greptimeAuth)
 
 	cfg, err := config.Load(filepath.Join("testdata", "valid.yaml"))
 	if err != nil {
@@ -176,8 +175,8 @@ buffer:
 }
 
 func TestValidate_RejectsBadConfig(t *testing.T) {
-	t.Setenv("TRACEALYZER_INGESTION_OTLP_GRPC_ENDPOINT", "")
-	t.Setenv("TRACEALYZER_SERVICE_LOG_LEVEL", "trace")
+	t.Setenv("INGESTION_OTLP_GRPC_ENDPOINT", "")
+	t.Setenv("SERVICE_LOG_LEVEL", "trace")
 
 	path := writeTempYAML(t, []byte(`
 ingestion:

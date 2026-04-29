@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -17,10 +20,10 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"github.com/mydecisive/mdai-tracealyzer/internal/emit"
+	"github.com/mydecisive/mdai-tracealyzer/internal/greptimecfg"
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
 	"github.com/mydecisive/mdai-tracealyzer/internal/observability"
 	"github.com/mydecisive/mdai-tracealyzer/internal/schema"
-	"github.com/mydecisive/mdai-tracealyzer/internal/sweep"
 	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -38,16 +41,25 @@ const (
 )
 
 var configPathFlag = flag.String("config", "", "path to tracealyzer YAML config")
-var migrateFlag = flag.Bool("migrate", false, "check and create required GreptimeDB schema objects, then exit")
+var emitSampleFileFlag = flag.String("emit-sample-file", "", "temporary: read RootMetrics JSON from file and emit it to GreptimeDB")
+var emitTemplateFileFlag = flag.String("emit-template-file", "", "temporary: read one RootMetrics JSON template and emit generated rows forever")
+var emitIntervalFlag = flag.Duration("emit-interval", time.Second, "temporary: sleep interval for --emit-template-file")
 
 func main() {
 	flag.Parse()
-	os.Exit(mainExit(*configPathFlag, *migrateFlag))
+	os.Exit(mainExit(*configPathFlag, *emitSampleFileFlag, *emitTemplateFileFlag, *emitIntervalFlag))
 }
 
-func mainExit(configPath string, migrate bool) int {
+func mainExit(configPath, emitSampleFile, emitTemplateFile string, emitInterval time.Duration) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if emitSampleFile != "" {
+		return emitSampleMain(ctx, emitSampleFile)
+	}
+	if emitTemplateFile != "" {
+		return emitGeneratorMain(ctx, emitTemplateFile, emitInterval)
+	}
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -62,16 +74,6 @@ func mainExit(configPath string, migrate bool) int {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	if migrate {
-		manager := schema.New(cfg.Emitter, logger)
-		if err := manager.Migrate(ctx); err != nil {
-			logger.Error("schema migration failed", zap.Error(err))
-			return 1
-		}
-		logger.Info("schema migration completed")
-		return 0
-	}
-
 	if err := run(ctx, cfg, logger); err != nil {
 		logger.Error("service failed", zap.Error(err))
 		return 1
@@ -79,16 +81,253 @@ func mainExit(configPath string, migrate bool) int {
 	return 0
 }
 
-//nolint:funlen // TODO: split into startProbes / startIngestServers / awaitServeOrSignal / finalizeShutdown.
-func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
-	ctx, cancelRun := context.WithCancel(ctx)
-	defer cancelRun()
+type rootChoice struct {
+	rootID        string
+	rootService   string
+	rootOperation string
+}
 
+var testRootChoices = []rootChoice{
+	{
+		rootID:        "gateway-api::GET /checkout/:id",
+		rootService:   "gateway-api",
+		rootOperation: "GET /checkout/:id",
+	},
+	{
+		rootID:        "checkout-api::POST /checkout",
+		rootService:   "checkout-api",
+		rootOperation: "POST /checkout",
+	},
+	{
+		rootID:        "catalog-api::GET /catalog/:sku",
+		rootService:   "catalog-api",
+		rootOperation: "GET /catalog/:sku",
+	},
+	{
+		rootID:        "payments-api::POST /payments/authorize",
+		rootService:   "payments-api",
+		rootOperation: "POST /payments/authorize",
+	},
+	{
+		rootID:        "inventory-grpc-service::Inventory/ReserveItems",
+		rootService:   "inventory-grpc-service",
+		rootOperation: "Inventory/ReserveItems",
+	},
+}
+
+func emitGeneratorMain(ctx context.Context, templatePath string, interval time.Duration) int {
+	if interval <= 0 {
+		_, _ = fmt.Fprintln(os.Stderr, "emit-interval must be > 0")
+		return 1
+	}
+
+	logger, err := observability.NewLogger("debug")
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, fmt.Errorf("init logger: %w", err))
+		return 1
+	}
+	defer func() { _ = logger.Sync() }()
+
+	template, err := loadSampleTemplate(templatePath)
+	if err != nil {
+		logger.Error("load sample template", zap.Error(err))
+		return 1
+	}
+
+	cfg := temporaryEmitterConfig()
+	schemaManager := schema.New(cfg, logger)
+	if err := schemaManager.CheckReady(ctx); err != nil {
+		logger.Error("schema readiness", zap.Error(err))
+		return 1
+	}
+	emitter, err := emit.New(cfg, logger, observability.NewRegistry())
+	if err != nil {
+		logger.Error("create emitter", zap.Error(err))
+		return 1
+	}
+
+	logger.Info("sample generator started",
+		zap.String("template_path", templatePath),
+		zap.Duration("interval", interval),
+		zap.String("greptimedb_endpoint", cfg.GreptimeDBEndpoint),
+		zap.String("greptimedb_database", cfg.GreptimeDBDatabase),
+		zap.String("table_name", greptimecfg.SourceTableName),
+	)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var emitted int
+	for {
+		row, err := generateSampleRow(template)
+		if err != nil {
+			logger.Error("generate sample row", zap.Error(err))
+			return closeEmitterForSample(emitter, logger)
+		}
+
+		if err := emitter.Emit(ctx, []topology.RootMetrics{row}); err != nil {
+			logger.Error("emit generated sample row", zap.Error(err))
+			return closeEmitterForSample(emitter, logger)
+		}
+		emitted++
+
+		logger.Info("generated sample row accepted",
+			zap.Int("emitted", emitted),
+			zap.String("trace_id", row.TraceID),
+			zap.String("root_id", row.RootID),
+		)
+
+		select {
+		case <-ctx.Done():
+			logger.Info("sample generator stopping", zap.Int("emitted", emitted))
+			return closeEmitterForSample(emitter, logger)
+		case <-ticker.C:
+		}
+	}
+}
+
+func emitSampleMain(ctx context.Context, samplePath string) int {
+	logger, err := observability.NewLogger("debug")
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, fmt.Errorf("init logger: %w", err))
+		return 1
+	}
+	defer func() { _ = logger.Sync() }()
+
+	rows, err := loadSampleRows(samplePath)
+	if err != nil {
+		logger.Error("load sample rows", zap.Error(err))
+		return 1
+	}
+
+	cfg := temporaryEmitterConfig()
+	schemaManager := schema.New(cfg, logger)
+	if err := schemaManager.CheckReady(ctx); err != nil {
+		logger.Error("schema readiness", zap.Error(err))
+		return 1
+	}
+	emitter, err := emit.New(cfg, logger, observability.NewRegistry())
+	if err != nil {
+		logger.Error("create emitter", zap.Error(err))
+		return 1
+	}
+
+	if err := emitter.Emit(ctx, rows); err != nil {
+		logger.Error("emit sample rows", zap.Error(err))
+		_ = emitter.Close(context.Background())
+		return 1
+	}
+
+	if code := closeEmitterForSample(emitter, logger); code != 0 {
+		return code
+	}
+
+	logger.Info("sample rows emitted",
+		zap.String("sample_path", samplePath),
+		zap.Int("row_count", len(rows)),
+		zap.String("greptimedb_endpoint", cfg.GreptimeDBEndpoint),
+		zap.String("greptimedb_database", cfg.GreptimeDBDatabase),
+		zap.String("table_name", greptimecfg.SourceTableName),
+	)
+	return 0
+}
+
+func temporaryEmitterConfig() config.Emitter {
+	return config.Emitter{
+		GreptimeDBEndpoint:    "127.0.0.1:4001",
+		GreptimeDBSqlEndpoint: "127.0.0.1:4003",
+		GreptimeDBDatabase:    "mdai",
+		GreptimeDBAuth:        "mdai:R2vELRu8AG0X1cOfKSzOTu1LZc8gDttc",
+		TableTTL:              "14d",
+		Timeout:               config.Duration(10 * time.Second),
+		MaxRetries:            3,
+		InitialBackoff:        config.Duration(time.Second),
+		BatchSize:             100,
+		FlushInterval:         config.Duration(10 * time.Second),
+		QueueCapacity:         1024,
+	}
+}
+
+func closeEmitterForSample(emitter emit.Emitter, logger *zap.Logger) int {
+	closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := emitter.Close(closeCtx); err != nil {
+		logger.Error("close emitter", zap.Error(err))
+		return 1
+	}
+	return 0
+}
+
+func loadSampleRows(path string) ([]topology.RootMetrics, error) {
+	// #nosec G304 -- path is an explicit operator-provided CLI argument for local testing.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read sample file %q: %w", path, err)
+	}
+
+	var rows []topology.RootMetrics
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, fmt.Errorf("parse sample file %q: %w", path, err)
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("sample file %q contains no rows", path)
+	}
+	return rows, nil
+}
+
+func loadSampleTemplate(path string) (topology.RootMetrics, error) {
+	// #nosec G304 -- path is an explicit operator-provided CLI argument for local testing.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return topology.RootMetrics{}, fmt.Errorf("read sample template %q: %w", path, err)
+	}
+
+	var row topology.RootMetrics
+	if err := json.Unmarshal(data, &row); err != nil {
+		return topology.RootMetrics{}, fmt.Errorf("parse sample template %q: %w", path, err)
+	}
+	return row, nil
+}
+
+func generateSampleRow(template topology.RootMetrics) (topology.RootMetrics, error) {
+	choice, err := randomRootChoice()
+	if err != nil {
+		return topology.RootMetrics{}, err
+	}
+	traceID, err := randomTraceID()
+	if err != nil {
+		return topology.RootMetrics{}, err
+	}
+
+	row := template
+	row.TraceID = traceID
+	row.RootID = choice.rootID
+	row.RootService = choice.rootService
+	row.RootOperation = choice.rootOperation
+	return row, nil
+}
+
+func randomRootChoice() (rootChoice, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(testRootChoices))))
+	if err != nil {
+		return rootChoice{}, fmt.Errorf("choose root_id: %w", err)
+	}
+	return testRootChoices[n.Int64()], nil
+}
+
+func randomTraceID() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", fmt.Errorf("generate trace_id: %w", err)
+	}
+	return fmt.Sprintf("%032x", id), nil
+}
+
+func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	ready := app.NewReadiness("otlp_grpc", "otlp_http", "buffer")
 	registry := observability.NewRegistry()
 	ingestMetrics := ingest.NewMetrics(registry)
 	bufferMetrics := buffer.NewMetrics(registry, ingestMetrics.MalformedDrainCounter())
-	sweepMetrics := sweep.NewMetrics(registry)
 
 	valkeyBuffer, err := buffer.NewValkeyBuffer(buffer.ValkeyOptions{
 		Addr:     cfg.Buffer.ValkeyAddr,
@@ -102,39 +341,6 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		return fmt.Errorf("valkey buffer: %w", err)
 	}
 	defer valkeyBuffer.Close()
-
-	// The emitter owns an internal goroutine keyed on its own Close(ctx)
-	// lifecycle; parent cancellation must not abort an in-flight flush, so its
-	// worker deliberately does not inherit ctx.
-	emitter, err := emit.New(cfg.Emitter, logger, registry) //nolint:contextcheck
-	if err != nil {
-		return fmt.Errorf("emitter: %w", err)
-	}
-	// Safety net for early-return paths. The main shutdown path closes the
-	// emitter explicitly under shutdownCtx; a subsequent Close on the same
-	// emitter blocks on the already-closed done channel and is idempotent.
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(
-			context.WithoutCancel(ctx), cfg.Service.ShutdownGrace.Duration(),
-		)
-		defer cancel()
-		_ = emitter.Close(closeCtx)
-	}()
-
-	schemaManager := schema.New(cfg.Emitter, logger)
-	if err := waitForSchemaReady(ctx, cfg.Emitter, logger, schemaManager, sleepContext); err != nil {
-		return fmt.Errorf("schema readiness: %w", err)
-	}
-
-	sweeper, err := sweep.New(valkeyBuffer, topologyComputer{}, emitter, sweep.Config{
-		QuietPeriod:    cfg.Buffer.QuietPeriod.Duration(),
-		MaxTTL:         cfg.Buffer.MaxTTL.Duration(),
-		Interval:       cfg.Buffer.SweepInterval.Duration(),
-		WorkerPoolSize: cfg.Buffer.SweepWorkerPoolSize,
-	}, sweepMetrics, logger)
-	if err != nil {
-		return fmt.Errorf("sweeper: %w", err)
-	}
 
 	listeners, err := openListeners(ctx, cfg)
 	if err != nil {
@@ -154,6 +360,7 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		zap.Duration("shutdown_grace", cfg.Service.ShutdownGrace.Duration()),
 		zap.Strings("readiness_pending", ready.Pending()),
 	)
+
 	var probeWG sync.WaitGroup
 	probeWG.Go(func() {
 		if err := valkeyBuffer.WaitUntilReady(ctx); err != nil {
@@ -161,13 +368,6 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		}
 		ready.Mark("buffer")
 		logger.Info("valkey reachable; buffer ready")
-	})
-
-	var sweeperWG sync.WaitGroup
-	sweeperWG.Go(func() {
-		if err := sweeper.Run(ctx); err != nil {
-			logger.Error("sweeper exited", zap.Error(err))
-		}
 	})
 
 	errCh := make(chan serveResult, numServers)
@@ -191,25 +391,12 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		}
 	}
 
-	// Propagate shutdown to the sweeper goroutine when a server crash — not a
-	// signal — triggered the wind-down; SIGTERM already cancelled ctx.
-	cancelRun()
-
 	shutdownCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(ctx), cfg.Service.ShutdownGrace.Duration(),
 	)
 	defer cancel()
 
 	shutdownErr := gracefulShutdown(shutdownCtx, errCh, remaining, &probeWG, logger, adminServer, grpcServer, httpServer)
-
-	// Wait for the sweeper's in-flight tick before closing the emitter so a
-	// late Emit cannot land after the queue starts draining; bounded by
-	// shutdownCtx so a stalled Drain cannot block exit past the grace.
-	waitForSweeper(shutdownCtx, &sweeperWG, logger)
-	if err := emitter.Close(shutdownCtx); err != nil {
-		logger.Warn("close emitter", zap.Error(err))
-	}
-
 	if serveErr != nil {
 		return serveErr
 	}
@@ -218,101 +405,6 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	}
 	logger.Info("service stopped")
 	return nil
-}
-
-// topologyComputer forwards all authentic roots from topology.Compute;
-// multi-root traces yield one row per root. Orphans propagate even on the
-// ErrNoRoot branch so the sweeper records them for all-orphan traces.
-type topologyComputer struct{}
-
-func (topologyComputer) Compute(traceID [16]byte, _ string, records map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
-	spans := make(map[[8]byte]topology.Span, len(records))
-	for _, r := range records {
-		spans[r.SpanID] = topology.Span{
-			SpanID:       r.SpanID,
-			ParentSpanID: r.ParentSpanID,
-			Service:      r.Service,
-			Name:         r.Name,
-			Kind:         r.Kind,
-			StartTimeNs:  r.StartTimeNs,
-			EndTimeNs:    r.EndTimeNs,
-			StatusError:  r.StatusError,
-			OpAttrs:      r.OpAttrs,
-		}
-	}
-	rows, orphans := topology.Compute(traceID, spans)
-	if len(rows) == 0 && len(spans) > 0 {
-		return nil, orphans, sweep.ErrNoRoot
-	}
-	if len(rows) == 0 {
-		return nil, orphans, nil
-	}
-	return rows, orphans, nil
-}
-
-type schemaChecker interface {
-	CheckReady(ctx context.Context) error
-}
-
-func waitForSchemaReady(
-	ctx context.Context,
-	cfg config.Emitter,
-	logger *zap.Logger,
-	checker schemaChecker,
-	sleep func(context.Context, time.Duration) error,
-) error {
-	maxAttempts := cfg.MaxRetries + 1
-	var lastErr error
-
-	for attempt := range maxAttempts {
-		attemptNumber := attempt + 1
-		logger.Info("attempt schema readiness check",
-			zap.Int("attempt", attemptNumber),
-			zap.Int("max_attempts", maxAttempts),
-			zap.String("endpoint", cfg.GreptimeDBSqlEndpoint),
-			zap.String("database", cfg.GreptimeDBDatabase),
-		)
-
-		if err := checker.CheckReady(ctx); err == nil {
-			logger.Info("schema ready",
-				zap.Int("attempt", attemptNumber),
-				zap.String("endpoint", cfg.GreptimeDBSqlEndpoint),
-				zap.String("database", cfg.GreptimeDBDatabase),
-			)
-			return nil
-		} else {
-			lastErr = err
-		}
-
-		if attempt >= cfg.MaxRetries {
-			break
-		}
-
-		backoff := cfg.InitialBackoff.Duration() * time.Duration(1<<attempt)
-		logger.Warn("schema readiness check failed; retrying",
-			zap.Int("attempt", attemptNumber),
-			zap.Int("max_attempts", maxAttempts),
-			zap.Duration("backoff", backoff),
-			zap.Error(lastErr),
-		)
-		if err := sleep(ctx, backoff); err != nil {
-			return fmt.Errorf("wait schema readiness retry: %w", err)
-		}
-	}
-
-	return lastErr
-}
-
-func sleepContext(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 func buildAdminMux(registry *prometheus.Registry, ready *app.Readiness) *http.ServeMux {
@@ -383,19 +475,6 @@ func gracefulShutdown(ctx context.Context, errCh <-chan serveResult, n int, prob
 	waitForServers(ctx, errCh, n, logger)
 	probeWG.Wait()
 	return err
-}
-
-func waitForSweeper(ctx context.Context, wg *sync.WaitGroup, logger *zap.Logger) {
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		logger.Warn("timed out waiting for sweeper shutdown", zap.Error(ctx.Err()))
-	}
 }
 
 func waitForServers(ctx context.Context, errCh <-chan serveResult, n int, logger *zap.Logger) {

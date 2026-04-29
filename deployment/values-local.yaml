@@ -6,11 +6,16 @@ image:
 
 config:
   emitter:
-    greptimedbEndpoint: "greptimedb-standalone.mdai.svc.cluster.local:4001"
-    greptimedbSqlEndpoint: "greptimedb-standalone.mdai.svc.cluster.local:4003"
+    greptimedbEndpoint: "mdai-greptimedb.mdai.svc.cluster.local:4001"
+    greptimedbSqlEndpoint: "mdai-greptimedb.mdai.svc.cluster.local:4003"
     greptimedbDatabase: "public"
   service:
     logLevel: debug
 
 serviceMonitor:
   enabled: false
+
+secrets:
+  greptimedbAuth:
+    existingSecret: greptimedb-users-auth
+    key: passwd

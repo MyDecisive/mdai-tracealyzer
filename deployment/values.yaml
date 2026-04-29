@@ -55,7 +55,6 @@ config:
     greptimedbEndpoint: "greptimedb:4001"
     greptimedbSqlEndpoint: "greptimedb:4003"
     greptimedbDatabase: "public"
-    tableName: "trace_root_topology"
     tableTtl: "14d"
     timeout: "10s"
     maxRetries: 3
