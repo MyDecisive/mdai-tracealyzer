@@ -18,33 +18,6 @@ const (
 	flowName        = greptimecfg.FlowName
 )
 
-const (
-	createSinkTableSQL = `CREATE TABLE IF NOT EXISTS trace_root_topology_1m (
-  time_window       TIMESTAMP(9) TIME INDEX,
-  root_id           STRING,
-  breadth_sketch    BINARY,
-  depth_sketch      BINARY,
-  duration_sketch   BINARY,
-  trace_count       BIGINT,
-  error_count_total BIGINT,
-  PRIMARY KEY (root_id)
-)`
-
-	createFlowSQL = `CREATE FLOW IF NOT EXISTS trace_root_topology_1m_flow
-SINK TO trace_root_topology_1m
-AS
-SELECT
-  date_bin('1 minute', timestamp)               AS time_window,
-  root_id,
-  uddsketch_state(128, 0.01, breadth)           AS breadth_sketch,
-  uddsketch_state(128, 0.01, service_hop_depth) AS depth_sketch,
-  uddsketch_state(128, 0.01, root_duration_ns)  AS duration_sketch,
-  count(*)                                      AS trace_count,
-  sum(error_count)                              AS error_count_total
-FROM trace_root_topology
-GROUP BY time_window, root_id`
-)
-
 type rowSet interface {
 	Close() error
 	Next() bool
@@ -117,8 +90,8 @@ type statement struct {
 func migrationStatements(cfg config.Emitter) []statement {
 	return []statement{
 		{name: sourceTableName, sql: createSourceTableSQL(cfg.TableTTL)},
-		{name: sinkTableName, sql: createSinkTableSQL},
-		{name: flowName, sql: createFlowSQL},
+		{name: sinkTableName, sql: createSinkTableSQL()},
+		{name: flowName, sql: createFlowSQL()},
 	}
 }
 
@@ -131,7 +104,7 @@ func readinessStatements() []statement {
 }
 
 func createSourceTableSQL(ttl string) string {
-	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS trace_root_topology (
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
   "timestamp"       TIMESTAMP(9) TIME INDEX,
   root_id           STRING,
   trace_id          STRING,
@@ -145,7 +118,36 @@ func createSourceTableSQL(ttl string) string {
   error_count       INT,
   root_duration_ns  BIGINT,
   PRIMARY KEY (root_id, trace_id)
-) WITH (ttl='%s')`, ttl)
+) WITH (ttl='%s')`, sourceTableName, ttl)
+}
+
+func createSinkTableSQL() string {
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+  time_window       TIMESTAMP(9) TIME INDEX,
+  root_id           STRING,
+  breadth_sketch    BINARY,
+  depth_sketch      BINARY,
+  duration_sketch   BINARY,
+  trace_count       BIGINT,
+  error_count_total BIGINT,
+  PRIMARY KEY (root_id)
+)`, sinkTableName)
+}
+
+func createFlowSQL() string {
+	return fmt.Sprintf(`CREATE FLOW IF NOT EXISTS %s
+SINK TO %s
+AS
+SELECT
+  date_bin('1 minute', timestamp)               AS time_window,
+  root_id,
+  uddsketch_state(128, 0.01, breadth)           AS breadth_sketch,
+  uddsketch_state(128, 0.01, service_hop_depth) AS depth_sketch,
+  uddsketch_state(128, 0.01, root_duration_ns)  AS duration_sketch,
+  count(*)                                      AS trace_count,
+  sum(error_count)                              AS error_count_total
+FROM %s
+GROUP BY time_window, root_id`, flowName, sinkTableName, sourceTableName)
 }
 
 //nolint:ireturn // Intentional interface seam for DB mocking in unit tests.

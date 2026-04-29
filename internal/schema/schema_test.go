@@ -88,7 +88,7 @@ func TestManagerMigrateAppliesStatementsInOrder(t *testing.T) {
 	if err := m.Migrate(context.Background()); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	want := []string{createSourceTableSQL("14d"), createSinkTableSQL, createFlowSQL}
+	want := []string{createSourceTableSQL("14d"), createSinkTableSQL(), createFlowSQL()}
 	if len(conn.execs) != len(want) {
 		t.Fatalf("want %d statements, got %d", len(want), len(conn.execs))
 	}
