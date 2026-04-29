@@ -48,6 +48,7 @@ func (c *fakeSQLConn) PingContext(context.Context) error {
 	return c.pingErr
 }
 
+//nolint:ireturn
 func (c *fakeSQLConn) ExecContext(_ context.Context, query string, _ ...any) (sql.Result, error) {
 	c.execs = append(c.execs, query)
 	if len(c.execErrs) > 0 {
