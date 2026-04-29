@@ -28,7 +28,7 @@ func SplitEndpoint(endpoint string) (string, int, error) {
 
 // ParseAuth splits the configured GreptimeDB auth string into username and password.
 // The current deployment convention uses "=" as the separator.
-func ParseAuth(raw string) (string, string) {
+func ParseAuth(raw string) (username string, password string) {
 	if raw == "" {
 		return "", ""
 	}

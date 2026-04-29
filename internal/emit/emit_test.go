@@ -298,7 +298,7 @@ func TestMakeWriteBatchMapsAllTopologyFields(t *testing.T) {
 		RootDurationNS:  17,
 	}}
 
-	batch := makeWriteBatch("trace_root_topology", rows, ts)
+	batch := makeWriteBatch(rows, ts)
 	if batch.Table != "trace_root_topology" {
 		t.Fatalf("want table trace_root_topology, got %q", batch.Table)
 	}

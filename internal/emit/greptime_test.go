@@ -85,7 +85,7 @@ func TestGreptimeWriterWritesConfiguredTable(t *testing.T) {
 		client: client,
 	}
 
-	err := writer.Write(context.Background(), makeWriteBatch("trace_root_topology", sampleRows(1), time.Unix(1, 0)))
+	err := writer.Write(context.Background(), makeWriteBatch(sampleRows(1), time.Unix(1, 0)))
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestGreptimeWriterReturnsTransportError(t *testing.T) {
 		client: client,
 	}
 
-	err := writer.Write(context.Background(), makeWriteBatch("trace_root_topology", sampleRows(1), time.Unix(1, 0)))
+	err := writer.Write(context.Background(), makeWriteBatch(sampleRows(1), time.Unix(1, 0)))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -255,7 +255,7 @@ func TestGreptimeWriterReturnsResponseStatusError(t *testing.T) {
 		client: client,
 	}
 
-	err := writer.Write(context.Background(), makeWriteBatch("trace_root_topology", sampleRows(1), time.Unix(1, 0)))
+	err := writer.Write(context.Background(), makeWriteBatch(sampleRows(1), time.Unix(1, 0)))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -267,7 +267,7 @@ func TestGreptimeWriterReturnsResponseStatusError(t *testing.T) {
 func TestBuildTableMapsSchema(t *testing.T) {
 	t.Parallel()
 
-	tbl, err := buildTable(makeWriteBatch("trace_root_topology", sampleRows(1), time.Unix(1, 2)))
+	tbl, err := buildTable(makeWriteBatch(sampleRows(1), time.Unix(1, 2)))
 	if err != nil {
 		t.Fatalf("buildTable: %v", err)
 	}

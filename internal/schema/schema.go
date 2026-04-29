@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/url"
 
-	_ "github.com/lib/pq"
+	_ "github.com/lib/pq" // PostgreSQL driver for GreptimeDB SQL schema management.
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"github.com/mydecisive/mdai-tracealyzer/internal/greptimecfg"
 	"go.uber.org/zap"
@@ -124,9 +124,9 @@ func migrationStatements(cfg config.Emitter) []statement {
 
 func readinessStatements() []statement {
 	return []statement{
-		{name: sourceTableName, sql: fmt.Sprintf("SHOW CREATE TABLE %s", sourceTableName)},
-		{name: sinkTableName, sql: fmt.Sprintf("SHOW CREATE TABLE %s", sinkTableName)},
-		{name: flowName, sql: fmt.Sprintf("SHOW CREATE FLOW %s", flowName)},
+		{name: sourceTableName, sql: "SHOW CREATE TABLE " + sourceTableName},
+		{name: sinkTableName, sql: "SHOW CREATE TABLE " + sinkTableName},
+		{name: flowName, sql: "SHOW CREATE FLOW " + flowName},
 	}
 }
 
@@ -148,6 +148,7 @@ func createSourceTableSQL(ttl string) string {
 ) WITH (ttl='%s')`, ttl)
 }
 
+//nolint:ireturn // Intentional interface seam for DB mocking in unit tests.
 func (m *Manager) connect(ctx context.Context) (sqlConn, error) {
 	dsn, err := buildPostgresDSN(m.cfg)
 	if err != nil {
@@ -187,10 +188,12 @@ type sqlDB struct {
 	*sql.DB
 }
 
+//nolint:ireturn,rowserrcheck // Intentional interface seam for DB mocking in unit tests.
 func (db sqlDB) QueryContext(ctx context.Context, query string, args ...any) (rowSet, error) {
 	return db.DB.QueryContext(ctx, query, args...)
 }
 
+//nolint:ireturn // Intentional interface seam for DB mocking in unit tests.
 func openPostgresDB(dsn string) (sqlConn, error) {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

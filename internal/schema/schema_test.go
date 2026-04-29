@@ -34,6 +34,16 @@ type fakeSQLConn struct {
 	closed    bool
 }
 
+type fakeResult struct{}
+
+func (fakeResult) LastInsertId() (int64, error) {
+	return 0, nil
+}
+
+func (fakeResult) RowsAffected() (int64, error) {
+	return 0, nil
+}
+
 func (c *fakeSQLConn) PingContext(context.Context) error {
 	return c.pingErr
 }
@@ -47,9 +57,10 @@ func (c *fakeSQLConn) ExecContext(_ context.Context, query string, _ ...any) (sq
 			return nil, err
 		}
 	}
-	return nil, nil
+	return fakeResult{}, nil
 }
 
+//nolint:ireturn // Test fake must satisfy the production rowSet interface seam.
 func (c *fakeSQLConn) QueryContext(_ context.Context, query string, _ ...any) (rowSet, error) {
 	c.queries = append(c.queries, query)
 	if len(c.queryErrs) > 0 {

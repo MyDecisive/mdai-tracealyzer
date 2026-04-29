@@ -269,7 +269,7 @@ func (e *emitter) writeWithRetry(parent context.Context, batch []topology.RootMe
 
 	for attempt := 0; ; attempt++ {
 		ctx, cancel := context.WithTimeout(parent, e.cfg.Timeout.Duration())
-		err := e.writer.Write(ctx, makeWriteBatch(greptimecfg.SourceTableName, batch, e.now()))
+		err := e.writer.Write(ctx, makeWriteBatch(batch, e.now()))
 		cancel()
 		if err == nil {
 			e.logger.Debug("emit: batch written",
@@ -306,7 +306,7 @@ func (e *emitter) recordDroppedRows(reason string, rows []topology.RootMetrics, 
 	e.logger.Warn("drop topology rows", fields...)
 }
 
-func makeWriteBatch(tableName string, rows []topology.RootMetrics, ts time.Time) writeBatch {
+func makeWriteBatch(rows []topology.RootMetrics, ts time.Time) writeBatch {
 	out := make([]row, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, row{
@@ -325,7 +325,7 @@ func makeWriteBatch(tableName string, rows []topology.RootMetrics, ts time.Time)
 		})
 	}
 	return writeBatch{
-		Table: tableName,
+		Table: greptimecfg.SourceTableName,
 		Rows:  out,
 	}
 }

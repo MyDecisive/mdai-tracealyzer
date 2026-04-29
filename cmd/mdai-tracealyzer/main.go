@@ -37,6 +37,13 @@ const (
 	numServers = 3
 )
 
+type runMode int
+
+const (
+	runModeServe runMode = iota
+	runModeMigrate
+)
+
 var (
 	configPathFlag = flag.String("config", "", "path to tracealyzer YAML config")
 	migrateFlag    = flag.Bool("migrate", false, "check and create required GreptimeDB schema objects, then exit")
@@ -44,10 +51,14 @@ var (
 
 func main() {
 	flag.Parse()
-	os.Exit(mainExit(*configPathFlag, *migrateFlag))
+	mode := runModeServe
+	if *migrateFlag {
+		mode = runModeMigrate
+	}
+	os.Exit(mainExit(*configPathFlag, mode))
 }
 
-func mainExit(configPath string, migrate bool) int {
+func mainExit(configPath string, mode runMode) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -64,7 +75,7 @@ func mainExit(configPath string, migrate bool) int {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	if migrate {
+	if mode == runModeMigrate {
 		manager := schema.New(cfg.Emitter, logger)
 		if err := manager.Migrate(ctx); err != nil {
 			logger.Error("schema migration failed", zap.Error(err))
@@ -124,8 +135,9 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	}()
 
 	schemaManager := schema.New(cfg.Emitter, logger)
-	if err := waitForSchemaReady(ctx, cfg.Emitter, logger, schemaManager, sleepContext); err != nil {
-		return fmt.Errorf("schema readiness: %w", err)
+	schemaErr := waitForSchemaReady(ctx, cfg.Emitter, logger, schemaManager, sleepContext)
+	if schemaErr != nil {
+		return fmt.Errorf("schema readiness: %w", schemaErr)
 	}
 
 	sweeper, err := sweep.New(valkeyBuffer, topologyComputer{}, emitter, sweep.Config{
@@ -275,16 +287,16 @@ func waitForSchemaReady(
 			zap.String("database", cfg.GreptimeDBDatabase),
 		)
 
-		if err := checker.CheckReady(ctx); err == nil {
+		err := checker.CheckReady(ctx)
+		if err == nil {
 			logger.Info("schema ready",
 				zap.Int("attempt", attemptNumber),
 				zap.String("endpoint", cfg.GreptimeDBSqlEndpoint),
 				zap.String("database", cfg.GreptimeDBDatabase),
 			)
 			return nil
-		} else {
-			lastErr = err
 		}
+		lastErr = err
 
 		if attempt >= cfg.MaxRetries {
 			break
