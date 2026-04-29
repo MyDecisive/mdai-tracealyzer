@@ -35,7 +35,7 @@ endef
 	logs metrics-forward \
 	helm helm-package helm-publish status \
 	demo-deploy-gateway demo-delete-gateway demo-port-forward \
-	demo-up demo-down demo-reset demo-emit demo-agent-logs demo-gateway-logs \
+	demo-up demo-down demo-reset demo-emit demo-scenarios demo-agent-logs demo-gateway-logs \
 	demo-load-up demo-load-down demo-load-logs
 
 build: tidy
@@ -164,24 +164,11 @@ demo-reset:
 	$(COMPOSE) up --build -d
 
 demo-emit:
-	@case "$(DEMO_SCENARIO)" in \
-		browse) URL='/browse?scenario=browse';; \
-		inventory-http) URL='/inventory?transport=http&scenario=inventory-http';; \
-		inventory-grpc) URL='/inventory?transport=grpc&scenario=inventory-grpc';; \
-		checkout-http) URL='/checkout?transport=http&rollback=false&scenario=checkout-http';; \
-		checkout-grpc) URL='/checkout?transport=grpc&rollback=false&scenario=checkout-grpc';; \
-		checkout-rollback-grpc) URL='/checkout?transport=grpc&rollback=true&scenario=checkout-rollback-grpc';; \
-		checkout-http-error) URL='/checkout?transport=http&fail=true&scenario=checkout-http-error';; \
-		checkout-grpc-error) URL='/checkout?transport=grpc&scenario=checkout-grpc-error';; \
-		wide) URL='/wide?scenario=wide';; \
-		deep) URL='/deep?scenario=deep';; \
-		checkout-async-joined) URL='/checkout?transport=grpc&notify=joined&scenario=checkout-async-joined';; \
-		checkout-async-detached) URL='/checkout?transport=grpc&notify=detached&scenario=checkout-async-detached';; \
-		catalog-db) URL='/browse?source=db&scenario=catalog-db';; \
-		browse-cached) URL='/browse?cache=true&scenario=browse-cached';; \
-		*) echo "unknown scenario: $(DEMO_SCENARIO)"; exit 1;; \
-	esac; \
-	curl -sS "$(DEMO_GATEWAY_URL)$$URL"
+	@cd $(TEST_STAND_DIR)/demo && \
+		GATEWAY_URL=$(DEMO_GATEWAY_URL) $(GO) run ./cmd/load-generator -once $(DEMO_SCENARIO)
+
+demo-scenarios:
+	@cd $(TEST_STAND_DIR)/demo && $(GO) run ./cmd/load-generator -list
 
 demo-gateway-logs:
 	$(KUBECTL) logs -l app=$(TEST_GATEWAY_NAME) --tail=200 -f

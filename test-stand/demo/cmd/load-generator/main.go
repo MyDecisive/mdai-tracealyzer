@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"math/rand"
 	"net/http"
-	"net/url"
+	"os"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -14,29 +15,8 @@ import (
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/test-stand/demo/internal/common"
+	"github.com/mydecisive/mdai-tracealyzer/test-stand/demo/internal/scenarios"
 )
-
-type scenarioRoute struct {
-	Path  string
-	Query map[string]string
-}
-
-var scenarioRoutes = map[string]scenarioRoute{
-	"browse":                  {Path: "/browse"},
-	"inventory-http":          {Path: "/inventory", Query: map[string]string{"transport": "http"}},
-	"inventory-grpc":          {Path: "/inventory", Query: map[string]string{"transport": "grpc"}},
-	"checkout-http":           {Path: "/checkout", Query: map[string]string{"transport": "http", "rollback": "false"}},
-	"checkout-grpc":           {Path: "/checkout", Query: map[string]string{"transport": "grpc", "rollback": "false"}},
-	"checkout-rollback-grpc":  {Path: "/checkout", Query: map[string]string{"transport": "grpc", "rollback": "true"}},
-	"checkout-http-error":     {Path: "/checkout", Query: map[string]string{"transport": "http", "fail": "true"}},
-	"checkout-grpc-error":     {Path: "/checkout", Query: map[string]string{"transport": "grpc"}},
-	"wide":                    {Path: "/wide"},
-	"deep":                    {Path: "/deep"},
-	"checkout-async-joined":   {Path: "/checkout", Query: map[string]string{"transport": "grpc", "notify": "joined"}},
-	"checkout-async-detached": {Path: "/checkout", Query: map[string]string{"transport": "grpc", "notify": "detached"}},
-	"catalog-db":              {Path: "/browse", Query: map[string]string{"source": "db"}},
-	"browse-cached":           {Path: "/browse", Query: map[string]string{"cache": "true"}},
-}
 
 type weightedScenario struct {
 	Name   string
@@ -60,8 +40,8 @@ func parseMix(spec string) (mix, error) {
 			return mix{}, fmt.Errorf("invalid MIX entry %q (want name:weight)", entry)
 		}
 		name := strings.TrimSpace(parts[0])
-		if _, ok := scenarioRoutes[name]; !ok {
-			return mix{}, fmt.Errorf("unknown scenario %q", name)
+		if err := scenarios.Validate(name); err != nil {
+			return mix{}, err
 		}
 		weight, err := strconv.Atoi(strings.TrimSpace(parts[1]))
 		if err != nil || weight <= 0 {
@@ -87,6 +67,19 @@ func (m mix) pick(r *rand.Rand) string {
 	return m.scenarios[len(m.scenarios)-1].Name
 }
 
+func defaultMix() string {
+	names := scenarios.Names()
+	parts := make([]string, 0, len(names))
+	for _, n := range names {
+		weight := 1
+		if n == "wide" || n == "deep" {
+			weight = 2
+		}
+		parts = append(parts, fmt.Sprintf("%s:%d", n, weight))
+	}
+	return strings.Join(parts, ",")
+}
+
 func parseDuration(name, fallback string) (time.Duration, error) {
 	value := common.Getenv(name, fallback)
 	if value == "" || value == "0" {
@@ -96,40 +89,72 @@ func parseDuration(name, fallback string) (time.Duration, error) {
 }
 
 func main() {
+	once := flag.String("once", "", "emit a single scenario by name and exit")
+	listFlag := flag.Bool("list", false, "list scenario names and exit")
+	flag.Parse()
+
+	if *listFlag {
+		for _, n := range scenarios.Names() {
+			fmt.Println(n)
+		}
+		return
+	}
+
 	service := "load-generator"
 	logger := common.NewLogger(service)
-
 	gatewayURL := common.Getenv("GATEWAY_URL", "http://gateway-api:8080")
 	client := &http.Client{Timeout: 30 * time.Second}
 
+	if *once != "" {
+		os.Exit(runOnce(logger, client, gatewayURL, *once))
+	}
+
+	if err := runLoop(logger, client, gatewayURL); err != nil {
+		logger.Info(context.Background(), "load-generator error", map[string]any{"event": "load_generator_error", "error": err.Error()})
+		os.Exit(1)
+	}
+}
+
+func runOnce(logger *common.Logger, client *http.Client, gatewayURL, name string) int {
+	scenario, ok := scenarios.Get(name)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown scenario %q\n", name)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := emit(ctx, logger, client, gatewayURL, scenario, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "emit failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runLoop(logger *common.Logger, client *http.Client, gatewayURL string) error {
 	interval, err := parseDuration("INTERVAL", "1s")
 	if err != nil {
-		logger.Info(context.Background(), "invalid INTERVAL", map[string]any{"event": "config_invalid", "error": err.Error()})
-		return
+		return fmt.Errorf("invalid INTERVAL: %w", err)
 	}
 	if interval <= 0 {
 		interval = time.Second
 	}
 	startDelay, err := parseDuration("START_DELAY", "5s")
 	if err != nil {
-		logger.Info(context.Background(), "invalid START_DELAY", map[string]any{"event": "config_invalid", "error": err.Error()})
-		return
+		return fmt.Errorf("invalid START_DELAY: %w", err)
 	}
 	duration, err := parseDuration("DURATION", "0")
 	if err != nil {
-		logger.Info(context.Background(), "invalid DURATION", map[string]any{"event": "config_invalid", "error": err.Error()})
-		return
+		return fmt.Errorf("invalid DURATION: %w", err)
 	}
 	concurrency := common.GetenvInt("CONCURRENCY", 1)
 	if concurrency < 1 {
 		concurrency = 1
 	}
 
-	mixSpec := common.Getenv("MIX", "browse:1,inventory-grpc:1,checkout-grpc:1,checkout-rollback-grpc:1,checkout-http-error:1,checkout-grpc-error:1,wide:2,deep:2,checkout-async-joined:1,checkout-async-detached:1,catalog-db:1,browse-cached:1")
+	mixSpec := common.Getenv("MIX", defaultMix())
 	m, err := parseMix(mixSpec)
 	if err != nil {
-		logger.Info(context.Background(), "invalid MIX", map[string]any{"event": "config_invalid", "error": err.Error()})
-		return
+		return fmt.Errorf("invalid MIX: %w", err)
 	}
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -154,7 +179,7 @@ func main() {
 		select {
 		case <-time.After(startDelay):
 		case <-rootCtx.Done():
-			return
+			return nil
 		}
 	}
 
@@ -168,7 +193,19 @@ func main() {
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
-				emit(rootCtx, logger, client, gatewayURL, m.pick(r), workerID)
+				name := m.pick(r)
+				scenario, ok := scenarios.Get(name)
+				if !ok {
+					continue
+				}
+				if err := emit(rootCtx, logger, client, gatewayURL, scenario, workerID); err != nil && rootCtx.Err() == nil {
+					logger.Info(rootCtx, "emit failed", map[string]any{
+						"event":     "emit_failed",
+						"worker_id": workerID,
+						"scenario":  name,
+						"error":     err.Error(),
+					})
+				}
 				select {
 				case <-rootCtx.Done():
 					return
@@ -182,67 +219,34 @@ func main() {
 	logger.Info(context.Background(), "load-generator stopped", map[string]any{
 		"event": "load_generator_stopped",
 	})
+	return nil
 }
 
-func emit(ctx context.Context, logger *common.Logger, client *http.Client, gatewayURL, scenario string, workerID int) {
-	route, ok := scenarioRoutes[scenario]
-	if !ok {
-		logger.Info(ctx, "unknown scenario", map[string]any{
-			"event":     "emit_failed",
-			"worker_id": workerID,
-			"scenario":  scenario,
-		})
-		return
-	}
-
-	parsed, err := url.Parse(gatewayURL + route.Path)
+func emit(ctx context.Context, logger *common.Logger, client *http.Client, gatewayURL string, scenario scenarios.Scenario, workerID int) error {
+	target, err := scenario.URL(gatewayURL)
 	if err != nil {
-		logger.Info(ctx, "invalid gateway url", map[string]any{
-			"event":     "emit_failed",
-			"worker_id": workerID,
-			"scenario":  scenario,
-			"error":     err.Error(),
-		})
-		return
+		return fmt.Errorf("build url: %w", err)
 	}
-	q := parsed.Query()
-	q.Set("scenario", scenario)
-	for k, v := range route.Query {
-		q.Set(k, v)
-	}
-	parsed.RawQuery = q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		logger.Info(ctx, "emit request build failed", map[string]any{
-			"event":     "emit_failed",
-			"worker_id": workerID,
-			"scenario":  scenario,
-			"error":     err.Error(),
-		})
-		return
+		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("X-Request-ID", common.NewRequestID())
 
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
-		logger.Info(ctx, "emit request failed", map[string]any{
-			"event":     "emit_failed",
-			"worker_id": workerID,
-			"scenario":  scenario,
-			"error":     err.Error(),
-		})
-		return
+		return err
 	}
 	defer resp.Body.Close()
 
 	logger.Info(ctx, "emit completed", map[string]any{
 		"event":       "emit_completed",
 		"worker_id":   workerID,
-		"scenario":    scenario,
+		"scenario":    scenario.Name,
 		"status_code": resp.StatusCode,
 	})
+	return nil
 }
