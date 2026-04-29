@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/vika/global_ratio_mode/test-stand/demo/internal/pb"
+	"github.com/mydecisive/mdai-tracealyzer/test-stand/demo/internal/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/encoding"

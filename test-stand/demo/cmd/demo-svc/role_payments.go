@@ -2,21 +2,17 @@ package main
 
 import (
 	"context"
-	"log"
 	"net/http"
 
-	"github.com/vika/global_ratio_mode/test-stand/demo/internal/common"
+	"github.com/mydecisive/mdai-tracealyzer/test-stand/demo/internal/common"
 )
 
-func main() {
-	service := common.Getenv("DD_SERVICE", "payments-api")
-	stopTracer := common.StartTracer(service)
-	defer stopTracer()
-
-	logger := common.NewLogger(service)
+func runPayments(service string, logger *common.Logger) error {
 	mux := http.NewServeMux()
-
 	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/authorize", func(ctx context.Context, r *http.Request, meta common.RequestMeta) (any, error) {
+		if r.URL.Query().Get("fail") == "true" {
+			return nil, &common.HTTPError{Status: http.StatusInternalServerError, Message: "payments authorization failed"}
+		}
 		rollback := r.URL.Query().Get("rollback") == "true"
 		status := "authorized"
 		if rollback {
@@ -30,7 +26,5 @@ func main() {
 	})
 
 	addr := ":" + common.Getenv("PORT", "8080")
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatal(err)
-	}
+	return http.ListenAndServe(addr, mux)
 }

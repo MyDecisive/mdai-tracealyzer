@@ -7,6 +7,11 @@ x-traced-service-env: &traced-service-env
   DD_TRACE_128_BIT_TRACEID_GENERATION_ENABLED: "true"
   DD_VERSION: 1.0.0
 
+x-demo-build: &demo-build
+  context: ./demo
+  args:
+    SERVICE: demo-svc
+
 services:
   agent:
     image: gcr.io/datadoghq/agent:7
@@ -41,37 +46,26 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
 
-  demo-control:
-    build:
-      context: ./demo
-      args:
-        SERVICE: demo-control
-    depends_on:
-      - agent
-      - gateway-api
-    environment:
-      GATEWAY_URL: http://gateway-api:8080
-      PORT: "8080"
-    labels:
-      com.datadoghq.ad.logs: >-
-        [{"type":"docker","source":"go","service":"demo-control"}]
-    ports:
-      - "8081:8080"
-    restart: unless-stopped
-
   gateway-api:
-    build:
-      context: ./demo
-      args:
-        SERVICE: gateway-api
+    build: *demo-build
     depends_on:
-      - agent
-      - catalog-api
-      - checkout-api
-      - inventory-http-api
-      - inventory-grpc-service
+      agent:
+        condition: service_started
+      catalog-api:
+        condition: service_started
+      checkout-api:
+        condition: service_started
+      inventory-http-api:
+        condition: service_started
+      inventory-grpc-service:
+        condition: service_started
+      payments-api:
+        condition: service_started
+      redis:
+        condition: service_healthy
     environment:
       <<: *traced-service-env
+      DEMO_ROLE: gateway
       DD_GRPC_SERVICE: gateway-api
       DD_SERVICE: gateway-api
       PORT: "8080"
@@ -79,59 +73,70 @@ services:
       CHECKOUT_URL: http://checkout-api:8080
       INVENTORY_HTTP_URL: http://inventory-http-api:8080
       INVENTORY_GRPC_TARGET: inventory-grpc-service:50051
+      PAYMENTS_URL: http://payments-api:8080
+      REDIS_ADDR: redis:6379
     labels:
       com.datadoghq.ad.logs: >-
         [{"type":"docker","source":"go","service":"gateway-api"}]
+    ports:
+      - "8081:8080"
     restart: unless-stopped
 
   catalog-api:
-    build:
-      context: ./demo
-      args:
-        SERVICE: catalog-api
+    build: *demo-build
     depends_on:
-      - agent
+      agent:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     environment:
       <<: *traced-service-env
+      DEMO_ROLE: catalog
       DD_SERVICE: catalog-api
       PORT: "8080"
+      POSTGRES_DSN: postgres://demo:demo@postgres:5432/demo
     labels:
       com.datadoghq.ad.logs: >-
         [{"type":"docker","source":"go","service":"catalog-api"}]
     restart: unless-stopped
 
   checkout-api:
-    build:
-      context: ./demo
-      args:
-        SERVICE: checkout-api
+    build: *demo-build
     depends_on:
-      - agent
-      - inventory-http-api
-      - inventory-grpc-service
-      - payments-api
+      agent:
+        condition: service_started
+      inventory-http-api:
+        condition: service_started
+      inventory-grpc-service:
+        condition: service_started
+      payments-api:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
     environment:
       <<: *traced-service-env
+      DEMO_ROLE: checkout
       DD_GRPC_SERVICE: checkout-api
       DD_SERVICE: checkout-api
       PORT: "8080"
       PAYMENTS_URL: http://payments-api:8080
       INVENTORY_HTTP_URL: http://inventory-http-api:8080
       INVENTORY_GRPC_TARGET: inventory-grpc-service:50051
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC_JOINED: checkout-completed-joined
+      KAFKA_TOPIC_DETACHED: checkout-completed-detached
     labels:
       com.datadoghq.ad.logs: >-
         [{"type":"docker","source":"go","service":"checkout-api"}]
     restart: unless-stopped
 
   payments-api:
-    build:
-      context: ./demo
-      args:
-        SERVICE: payments-api
+    build: *demo-build
     depends_on:
       - agent
     environment:
       <<: *traced-service-env
+      DEMO_ROLE: payments
       DD_SERVICE: payments-api
       PORT: "8080"
     labels:
@@ -140,33 +145,138 @@ services:
     restart: unless-stopped
 
   inventory-http-api:
-    build:
-      context: ./demo
-      args:
-        SERVICE: inventory-http-api
+    build: *demo-build
     depends_on:
       - agent
+      - catalog-api
     environment:
       <<: *traced-service-env
+      DEMO_ROLE: inventory-http
       DD_SERVICE: inventory-http-api
       PORT: "8080"
+      CATALOG_URL: http://catalog-api:8080
     labels:
       com.datadoghq.ad.logs: >-
         [{"type":"docker","source":"go","service":"inventory-http-api"}]
     restart: unless-stopped
 
   inventory-grpc-service:
-    build:
-      context: ./demo
-      args:
-        SERVICE: inventory-grpc-service
+    build: *demo-build
     depends_on:
       - agent
     environment:
       <<: *traced-service-env
+      DEMO_ROLE: inventory-grpc
       DD_SERVICE: inventory-grpc-service
       GRPC_PORT: "50051"
     labels:
       com.datadoghq.ad.logs: >-
         [{"type":"docker","source":"go","service":"inventory-grpc-service"}]
+    restart: unless-stopped
+
+  notifier:
+    build: *demo-build
+    depends_on:
+      agent:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
+      catalog-api:
+        condition: service_started
+    environment:
+      <<: *traced-service-env
+      DEMO_ROLE: notifier
+      DD_SERVICE: notifier
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC_JOINED: checkout-completed-joined
+      KAFKA_TOPIC_DETACHED: checkout-completed-detached
+      KAFKA_GROUP_ID: notifier
+      CATALOG_URL: http://catalog-api:8080
+    labels:
+      com.datadoghq.ad.logs: >-
+        [{"type":"docker","source":"go","service":"notifier"}]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: demo
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d demo"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  kafka-init:
+    image: apache/kafka:3.9.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic checkout-completed-joined --partitions 1 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic checkout-completed-detached --partitions 1 --replication-factor 1
+        echo "topics ready"
+    restart: "no"
+
+  load-generator:
+    build:
+      context: ./demo
+      args:
+        SERVICE: load-generator
+    depends_on:
+      - gateway-api
+    environment:
+      GATEWAY_URL: http://gateway-api:8080
+      INTERVAL: "1s"
+      CONCURRENCY: "1"
+      START_DELAY: "5s"
+      DURATION: "0"
+      MIX: "browse:1,inventory-grpc:1,checkout-grpc:1,checkout-rollback-grpc:1,checkout-http-error:1,checkout-grpc-error:1,wide:2,deep:2,checkout-async-joined:1,checkout-async-detached:1"
+    labels:
+      com.datadoghq.ad.logs: >-
+        [{"type":"docker","source":"go","service":"load-generator"}]
+    profiles:
+      - load
     restart: unless-stopped

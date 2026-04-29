@@ -12,7 +12,7 @@ GOTOOLCHAIN       ?= go1.25.0
 TEST_GATEWAY_NAME ?= datadog-agent-test-gateway
 TEST_GATEWAY_SAMPLE ?= collector-datadog-agent-test-gateway.yaml
 TEST_STAND_DIR    ?= test-stand
-DEMO_CONTROL_URL  ?= http://localhost:8081
+DEMO_GATEWAY_URL  ?= http://localhost:8081
 DEMO_SCENARIO     ?= browse
 
 KUBECTL               = kubectl --context=$(KUBECTL_CONTEXT) -n $(NAMESPACE)
@@ -35,7 +35,8 @@ endef
 	logs metrics-forward \
 	helm helm-package helm-publish status \
 	demo-deploy-gateway demo-delete-gateway demo-port-forward \
-	demo-up demo-down demo-emit demo-agent-logs demo-gateway-logs
+	demo-up demo-down demo-reset demo-emit demo-scenarios demo-agent-logs demo-gateway-logs \
+	demo-load-up demo-load-down demo-load-logs
 
 build: tidy
 	$(GO) build -trimpath -ldflags="-w -s" -o mdai-tracealyzer ./cmd/mdai-tracealyzer
@@ -158,14 +159,32 @@ demo-up:
 demo-down:
 	$(COMPOSE) down --remove-orphans
 
+demo-reset:
+	$(COMPOSE) down -v --remove-orphans
+	$(COMPOSE) up --build -d
+
 demo-emit:
-	curl -sS -X POST $(DEMO_CONTROL_URL)/emit -H 'Content-Type: application/json' -d '{"scenario":"$(DEMO_SCENARIO)"}'
+	@cd $(TEST_STAND_DIR)/demo && \
+		GATEWAY_URL=$(DEMO_GATEWAY_URL) $(GO) run ./cmd/load-generator -once $(DEMO_SCENARIO)
+
+demo-scenarios:
+	@cd $(TEST_STAND_DIR)/demo && $(GO) run ./cmd/load-generator -list
 
 demo-gateway-logs:
 	$(KUBECTL) logs -l app=$(TEST_GATEWAY_NAME) --tail=200 -f
 
 demo-agent-logs:
 	$(COMPOSE) logs -f agent
+
+demo-load-up:
+	$(COMPOSE) --profile load up --build -d load-generator
+
+demo-load-down:
+	$(COMPOSE) stop load-generator
+	$(COMPOSE) rm -sf load-generator
+
+demo-load-logs:
+	$(COMPOSE) logs -f load-generator
 
 status:
 	$(KUBECTL) get opentelemetrycollectors
