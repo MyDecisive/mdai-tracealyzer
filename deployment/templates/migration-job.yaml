@@ -1,38 +1,38 @@
-apiVersion: apps/v1
-kind: Deployment
+{{- if .Values.migrationJob.enabled }}
+apiVersion: batch/v1
+kind: Job
 metadata:
-  name: {{ include "mdai-tracealyzer.fullname" . }}
+  name: {{ include "mdai-tracealyzer.fullname" . }}-migrate
   labels:
     {{- include "mdai-tracealyzer.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- with .Values.migrationJob.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
-  replicas: {{ .Values.replicaCount }}
-  selector:
-    matchLabels:
-      {{- include "mdai-tracealyzer.selectorLabels" . | nindent 6 }}
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.migrationJob.ttlSecondsAfterFinished }}
   template:
     metadata:
       labels:
         {{- include "mdai-tracealyzer.selectorLabels" . | nindent 8 }}
-        {{- with .Values.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
-      {{- with .Values.podAnnotations }}
-      annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        app.kubernetes.io/component: migration
     spec:
+      restartPolicy: OnFailure
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "mdai-tracealyzer.serviceAccountName" . }}
-      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        - name: {{ include "mdai-tracealyzer.name" . }}
+        - name: migrate
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.securityContext }}
@@ -42,42 +42,15 @@ spec:
           args:
             - --config
             - /etc/tracealyzer/config.yaml
-          ports:
-            - name: otlp-grpc
-              containerPort: {{ .Values.service.ports.otlpGrpc }}
-              protocol: TCP
-            - name: otlp-http
-              containerPort: {{ .Values.service.ports.otlpHttp }}
-              protocol: TCP
-            - name: metrics
-              containerPort: {{ .Values.service.ports.metrics }}
-              protocol: TCP
+            - --migrate
+          {{- if .Values.secrets.greptimedbAuth.existingSecret }}
           env:
-            - name: BUFFER_VALKEY_ADDR
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secrets.valkeySecretName | quote }}
-                  key: VALKEY_ENDPOINT
-            - name: BUFFER_VALKEY_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secrets.valkeySecretName | quote }}
-                  key: VALKEY_PASSWORD
-            {{- if .Values.secrets.greptimedbAuth.existingSecret }}
             - name: GREPTIMEDB_AUTH
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.greptimedbAuth.existingSecret | quote }}
                   key: {{ .Values.secrets.greptimedbAuth.key | quote }}
-            {{- end }}
-          livenessProbe:
-            httpGet:
-              path: /healthz/live
-              port: metrics
-          readinessProbe:
-            httpGet:
-              path: /healthz/ready
-              port: metrics
+          {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/tracealyzer
@@ -102,3 +75,4 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}

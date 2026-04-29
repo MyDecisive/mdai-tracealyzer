@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
+	"github.com/mydecisive/mdai-tracealyzer/internal/greptimecfg"
 	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
@@ -268,11 +269,11 @@ func (e *emitter) writeWithRetry(parent context.Context, batch []topology.RootMe
 
 	for attempt := 0; ; attempt++ {
 		ctx, cancel := context.WithTimeout(parent, e.cfg.Timeout.Duration())
-		err := e.writer.Write(ctx, makeWriteBatch(e.cfg.TableName, batch, e.now()))
+		err := e.writer.Write(ctx, makeWriteBatch(batch, e.now()))
 		cancel()
 		if err == nil {
 			e.logger.Debug("emit: batch written",
-				zap.String("table", e.cfg.TableName),
+				zap.String("table", greptimecfg.SourceTableName),
 				zap.Int("rows", len(batch)),
 				zap.Int("attempt", attempt))
 			return nil
@@ -305,7 +306,7 @@ func (e *emitter) recordDroppedRows(reason string, rows []topology.RootMetrics, 
 	e.logger.Warn("drop topology rows", fields...)
 }
 
-func makeWriteBatch(tableName string, rows []topology.RootMetrics, ts time.Time) writeBatch {
+func makeWriteBatch(rows []topology.RootMetrics, ts time.Time) writeBatch {
 	out := make([]row, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, row{
@@ -324,7 +325,7 @@ func makeWriteBatch(tableName string, rows []topology.RootMetrics, ts time.Time)
 		})
 	}
 	return writeBatch{
-		Table: tableName,
+		Table: greptimecfg.SourceTableName,
 		Rows:  out,
 	}
 }

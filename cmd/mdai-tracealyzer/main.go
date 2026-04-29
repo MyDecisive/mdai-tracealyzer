@@ -19,6 +19,7 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/emit"
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
 	"github.com/mydecisive/mdai-tracealyzer/internal/observability"
+	"github.com/mydecisive/mdai-tracealyzer/internal/schema"
 	"github.com/mydecisive/mdai-tracealyzer/internal/sweep"
 	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
@@ -36,14 +37,28 @@ const (
 	numServers = 3
 )
 
-var configPathFlag = flag.String("config", "", "path to tracealyzer YAML config")
+type runMode int
+
+const (
+	runModeServe runMode = iota
+	runModeMigrate
+)
+
+var (
+	configPathFlag = flag.String("config", "", "path to tracealyzer YAML config")
+	migrateFlag    = flag.Bool("migrate", false, "check and create required GreptimeDB schema objects, then exit")
+)
 
 func main() {
 	flag.Parse()
-	os.Exit(mainExit(*configPathFlag))
+	mode := runModeServe
+	if *migrateFlag {
+		mode = runModeMigrate
+	}
+	os.Exit(mainExit(*configPathFlag, mode))
 }
 
-func mainExit(configPath string) int {
+func mainExit(configPath string, mode runMode) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -59,6 +74,16 @@ func mainExit(configPath string) int {
 		return 1
 	}
 	defer func() { _ = logger.Sync() }()
+
+	if mode == runModeMigrate {
+		manager := schema.New(cfg.Emitter, logger)
+		if err := manager.Migrate(ctx); err != nil {
+			logger.Error("schema migration failed", zap.Error(err))
+			return 1
+		}
+		logger.Info("schema migration completed")
+		return 0
+	}
 
 	if err := run(ctx, cfg, logger); err != nil {
 		logger.Error("service failed", zap.Error(err))
@@ -108,6 +133,12 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		defer cancel()
 		_ = emitter.Close(closeCtx)
 	}()
+
+	schemaManager := schema.New(cfg.Emitter, logger)
+	schemaErr := waitForSchemaReady(ctx, cfg.Emitter, logger, schemaManager, sleepContext)
+	if schemaErr != nil {
+		return fmt.Errorf("schema readiness: %w", schemaErr)
+	}
 
 	sweeper, err := sweep.New(valkeyBuffer, topologyComputer{}, emitter, sweep.Config{
 		QuietPeriod:    cfg.Buffer.QuietPeriod.Duration(),
@@ -231,6 +262,71 @@ func (topologyComputer) Compute(traceID [16]byte, _ string, records map[string]b
 		return nil, orphans, nil
 	}
 	return rows, orphans, nil
+}
+
+type schemaChecker interface {
+	CheckReady(ctx context.Context) error
+}
+
+func waitForSchemaReady(
+	ctx context.Context,
+	cfg config.Emitter,
+	logger *zap.Logger,
+	checker schemaChecker,
+	sleep func(context.Context, time.Duration) error,
+) error {
+	maxAttempts := cfg.MaxRetries + 1
+	var lastErr error
+
+	for attempt := range maxAttempts {
+		attemptNumber := attempt + 1
+		logger.Info("attempt schema readiness check",
+			zap.Int("attempt", attemptNumber),
+			zap.Int("max_attempts", maxAttempts),
+			zap.String("endpoint", cfg.GreptimeDBSqlEndpoint),
+			zap.String("database", cfg.GreptimeDBDatabase),
+		)
+
+		err := checker.CheckReady(ctx)
+		if err == nil {
+			logger.Info("schema ready",
+				zap.Int("attempt", attemptNumber),
+				zap.String("endpoint", cfg.GreptimeDBSqlEndpoint),
+				zap.String("database", cfg.GreptimeDBDatabase),
+			)
+			return nil
+		}
+		lastErr = err
+
+		if attempt >= cfg.MaxRetries {
+			break
+		}
+
+		backoff := cfg.InitialBackoff.Duration() * time.Duration(1<<attempt)
+		logger.Warn("schema readiness check failed; retrying",
+			zap.Int("attempt", attemptNumber),
+			zap.Int("max_attempts", maxAttempts),
+			zap.Duration("backoff", backoff),
+			zap.Error(lastErr),
+		)
+		if err := sleep(ctx, backoff); err != nil {
+			return fmt.Errorf("wait schema readiness retry: %w", err)
+		}
+	}
+
+	return lastErr
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func buildAdminMux(registry *prometheus.Registry, ready *app.Readiness) *http.ServeMux {

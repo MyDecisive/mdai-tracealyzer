@@ -53,8 +53,9 @@ config:
     # sweepWorkerPoolSize: 4  # defaults to runtime.NumCPU() when unset
   emitter:
     greptimedbEndpoint: "greptimedb:4001"
+    greptimedbSqlEndpoint: "greptimedb:4003"
     greptimedbDatabase: "public"
-    tableName: "trace_root_topology"
+    tableTtl: "14d"
     timeout: "10s"
     maxRetries: 3
     initialBackoff: "1s"
@@ -71,6 +72,12 @@ secrets:
   greptimedbAuth:
     existingSecret: ""
     key: GREPTIMEDB_AUTH
+
+migrationJob:
+  enabled: true
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  annotations: {}
 
 podSecurityContext:
   runAsNonRoot: true

@@ -19,8 +19,9 @@ data:
       {{- end }}
     emitter:
       greptimedb_endpoint: {{ .Values.config.emitter.greptimedbEndpoint | quote }}
+      greptimedb_sql_endpoint: {{ .Values.config.emitter.greptimedbSqlEndpoint | quote }}
       greptimedb_database: {{ .Values.config.emitter.greptimedbDatabase | quote }}
-      table_name: {{ .Values.config.emitter.tableName | quote }}
+      table_ttl: {{ .Values.config.emitter.tableTtl | quote }}
       timeout: {{ .Values.config.emitter.timeout | quote }}
       max_retries: {{ .Values.config.emitter.maxRetries }}
       initial_backoff: {{ .Values.config.emitter.initialBackoff | quote }}

@@ -11,8 +11,9 @@ buffer:
 
 emitter:
   greptimedb_endpoint: "greptimedb.internal:4001"
+  greptimedb_sql_endpoint: "greptimedb.internal:4003"
   greptimedb_database: "traces"
-  table_name: "trace_root_topology_v2"
+  table_ttl: "21d"
   timeout: "15s"
   max_retries: 5
   initial_backoff: "500ms"

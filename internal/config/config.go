@@ -14,13 +14,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const envPrefix = "tracealyzer"
-
 const (
 	defaultQuietPeriod    = 60 * time.Second
 	defaultMaxTTL         = 10 * time.Minute
 	defaultSweepInterval  = 5 * time.Second
 	defaultEmitterTimeout = 10 * time.Second
+	defaultTableTTL       = "14d"
 	defaultMaxRetries     = 3
 	defaultInitialBackoff = time.Second
 	defaultBatchSize      = 100
@@ -56,16 +55,17 @@ type Buffer struct {
 
 // Emitter configures the GreptimeDB ingester.
 type Emitter struct {
-	GreptimeDBEndpoint string   `envconfig:"GREPTIMEDB_ENDPOINT" yaml:"greptimedb_endpoint"`
-	GreptimeDBDatabase string   `envconfig:"GREPTIMEDB_DATABASE" yaml:"greptimedb_database"`
-	GreptimeDBAuth     string   `envconfig:"GREPTIMEDB_AUTH"     yaml:"-"`
-	TableName          string   `envconfig:"TABLE_NAME"          yaml:"table_name"`
-	Timeout            Duration `envconfig:"TIMEOUT"             yaml:"timeout"`
-	MaxRetries         int      `envconfig:"MAX_RETRIES"         yaml:"max_retries"`
-	InitialBackoff     Duration `envconfig:"INITIAL_BACKOFF"     yaml:"initial_backoff"`
-	BatchSize          int      `envconfig:"BATCH_SIZE"          yaml:"batch_size"`
-	FlushInterval      Duration `envconfig:"FLUSH_INTERVAL"      yaml:"flush_interval"`
-	QueueCapacity      int      `envconfig:"QUEUE_CAPACITY"      yaml:"queue_capacity"`
+	GreptimeDBEndpoint    string   `envconfig:"GREPTIMEDB_ENDPOINT"     yaml:"greptimedb_endpoint"`
+	GreptimeDBSqlEndpoint string   `envconfig:"GREPTIMEDB_SQL_ENDPOINT" yaml:"greptimedb_sql_endpoint"`
+	GreptimeDBDatabase    string   `envconfig:"GREPTIMEDB_DATABASE"     yaml:"greptimedb_database"`
+	GreptimeDBAuth        string   `envconfig:"GREPTIMEDB_AUTH"         yaml:"-"`
+	TableTTL              string   `envconfig:"TABLE_TTL"               yaml:"table_ttl"`
+	Timeout               Duration `envconfig:"TIMEOUT"                 yaml:"timeout"`
+	MaxRetries            int      `envconfig:"MAX_RETRIES"             yaml:"max_retries"`
+	InitialBackoff        Duration `envconfig:"INITIAL_BACKOFF"         yaml:"initial_backoff"`
+	BatchSize             int      `envconfig:"BATCH_SIZE"              yaml:"batch_size"`
+	FlushInterval         Duration `envconfig:"FLUSH_INTERVAL"          yaml:"flush_interval"`
+	QueueCapacity         int      `envconfig:"QUEUE_CAPACITY"          yaml:"queue_capacity"`
 }
 
 // Service configures cross-cutting runtime settings.
@@ -94,7 +94,7 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
-	if err := envconfig.Process(envPrefix, &cfg); err != nil {
+	if err := envconfig.Process("", &cfg); err != nil {
 		return nil, fmt.Errorf("apply env overrides: %w", err)
 	}
 
@@ -158,11 +158,16 @@ func (e *Emitter) validate() []error {
 	if e.GreptimeDBEndpoint == "" {
 		errs = append(errs, errors.New("emitter.greptimedb_endpoint is required"))
 	}
+	if e.GreptimeDBSqlEndpoint == "" {
+		errs = append(errs, errors.New("emitter.greptimedb_sql_endpoint is required"))
+	}
 	if e.GreptimeDBDatabase == "" {
 		errs = append(errs, errors.New("emitter.greptimedb_database is required"))
 	}
-	if e.TableName == "" {
-		errs = append(errs, errors.New("emitter.table_name is required"))
+	if e.TableTTL == "" {
+		errs = append(errs, errors.New("emitter.table_ttl is required"))
+	} else if err := validateTTL(e.TableTTL); err != nil {
+		errs = append(errs, fmt.Errorf("emitter.table_ttl: %w", err))
 	}
 	if e.Timeout.Duration() <= 0 {
 		errs = append(errs, errors.New("emitter.timeout must be > 0"))
@@ -220,16 +225,17 @@ func defaults() Config {
 			SweepWorkerPoolSize: runtime.NumCPU(),
 		},
 		Emitter: Emitter{
-			GreptimeDBEndpoint: "greptimedb:4001",
-			GreptimeDBDatabase: "public",
-			GreptimeDBAuth:     "",
-			TableName:          "trace_root_topology",
-			Timeout:            Duration(defaultEmitterTimeout),
-			MaxRetries:         defaultMaxRetries,
-			InitialBackoff:     Duration(defaultInitialBackoff),
-			BatchSize:          defaultBatchSize,
-			FlushInterval:      Duration(defaultFlushInterval),
-			QueueCapacity:      defaultQueueCapacity,
+			GreptimeDBEndpoint:    "greptimedb:4001",
+			GreptimeDBSqlEndpoint: "greptimedb:4003",
+			GreptimeDBDatabase:    "public",
+			GreptimeDBAuth:        "",
+			TableTTL:              defaultTableTTL,
+			Timeout:               Duration(defaultEmitterTimeout),
+			MaxRetries:            defaultMaxRetries,
+			InitialBackoff:        Duration(defaultInitialBackoff),
+			BatchSize:             defaultBatchSize,
+			FlushInterval:         Duration(defaultFlushInterval),
+			QueueCapacity:         defaultQueueCapacity,
 		},
 		Service: Service{
 			LogLevel:        "info",

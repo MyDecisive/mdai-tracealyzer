@@ -13,7 +13,7 @@ spec:
   args:
     feature-gates: receiver.datadogreceiver.Enable128BitTraceID
   env:
-    - name: TRACEALYZER_OTLP_GRPC_ENDPOINT
+    - name: OTLP_GRPC_ENDPOINT
       value: "mdai-tracealyzer:4317"
   ports:
     - name: datadog
@@ -32,7 +32,7 @@ spec:
 
     exporters:
       otlp_grpc/tracealyzer:
-        endpoint: ${env:TRACEALYZER_OTLP_GRPC_ENDPOINT}
+        endpoint: ${env:OTLP_GRPC_ENDPOINT}
         tls:
           insecure: true
 

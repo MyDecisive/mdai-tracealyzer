@@ -28,8 +28,9 @@ func TestLoad_DefaultsWhenNoPath(t *testing.T) {
 	assertDuration(t, 5*time.Second, cfg.Buffer.SweepInterval)
 	assertEqual(t, runtime.NumCPU(), cfg.Buffer.SweepWorkerPoolSize)
 	assertEqual(t, "greptimedb:4001", cfg.Emitter.GreptimeDBEndpoint)
+	assertEqual(t, "greptimedb:4003", cfg.Emitter.GreptimeDBSqlEndpoint)
 	assertEqual(t, "public", cfg.Emitter.GreptimeDBDatabase)
-	assertEqual(t, "trace_root_topology", cfg.Emitter.TableName)
+	assertEqual(t, "14d", cfg.Emitter.TableTTL)
 	assertEqual(t, 3, cfg.Emitter.MaxRetries)
 	assertDuration(t, 10*time.Second, cfg.Emitter.Timeout)
 	assertDuration(t, time.Second, cfg.Emitter.InitialBackoff)
@@ -55,6 +56,8 @@ func TestLoad_YAMLOverridesDefaults(t *testing.T) {
 	assertDuration(t, 45*time.Second, cfg.Buffer.QuietPeriod)
 	assertDuration(t, 8*time.Minute, cfg.Buffer.MaxTTL)
 	assertEqual(t, "greptimedb.internal:4001", cfg.Emitter.GreptimeDBEndpoint)
+	assertEqual(t, "greptimedb.internal:4003", cfg.Emitter.GreptimeDBSqlEndpoint)
+	assertEqual(t, "21d", cfg.Emitter.TableTTL)
 	assertEqual(t, 5, cfg.Emitter.MaxRetries)
 	assertDuration(t, 500*time.Millisecond, cfg.Emitter.InitialBackoff)
 	assertEqual(t, 250, cfg.Emitter.BatchSize)
@@ -64,11 +67,13 @@ func TestLoad_YAMLOverridesDefaults(t *testing.T) {
 }
 
 func TestLoad_EnvOverridesYAML(t *testing.T) {
-	t.Setenv("TRACEALYZER_BUFFER_VALKEY_ADDR", "env-valkey:6379")
-	t.Setenv("TRACEALYZER_BUFFER_QUIET_PERIOD", "90s")
-	t.Setenv("TRACEALYZER_SERVICE_LOG_LEVEL", "warn")
-	t.Setenv("TRACEALYZER_EMITTER_MAX_RETRIES", "7")
-	t.Setenv("TRACEALYZER_EMITTER_QUEUE_CAPACITY", "512")
+	t.Setenv("BUFFER_VALKEY_ADDR", "env-valkey:6379")
+	t.Setenv("BUFFER_QUIET_PERIOD", "90s")
+	t.Setenv("SERVICE_LOG_LEVEL", "warn")
+	t.Setenv("EMITTER_MAX_RETRIES", "7")
+	t.Setenv("EMITTER_QUEUE_CAPACITY", "512")
+	t.Setenv("EMITTER_TABLE_TTL", "30d")
+	t.Setenv("EMITTER_GREPTIMEDB_SQL_ENDPOINT", "env-greptime-sql:4003")
 
 	cfg, err := config.Load(filepath.Join("testdata", "valid.yaml"))
 	if err != nil {
@@ -80,14 +85,16 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	assertEqual(t, "warn", cfg.Service.LogLevel)
 	assertEqual(t, 7, cfg.Emitter.MaxRetries)
 	assertEqual(t, 512, cfg.Emitter.QueueCapacity)
+	assertEqual(t, "30d", cfg.Emitter.TableTTL)
+	assertEqual(t, "env-greptime-sql:4003", cfg.Emitter.GreptimeDBSqlEndpoint)
 }
 
 func TestLoad_SecretsOnlyFromEnv(t *testing.T) {
 	valkeyPassword := testEnvValue(t, "valkey")
 	greptimeAuth := testEnvValue(t, "greptime")
 
-	t.Setenv("TRACEALYZER_BUFFER_VALKEY_PASSWORD", valkeyPassword)
-	t.Setenv("TRACEALYZER_EMITTER_GREPTIMEDB_AUTH", greptimeAuth)
+	t.Setenv("BUFFER_VALKEY_PASSWORD", valkeyPassword)
+	t.Setenv("EMITTER_GREPTIMEDB_AUTH", greptimeAuth)
 
 	cfg, err := config.Load(filepath.Join("testdata", "valid.yaml"))
 	if err != nil {
@@ -168,8 +175,8 @@ buffer:
 }
 
 func TestValidate_RejectsBadConfig(t *testing.T) {
-	t.Setenv("TRACEALYZER_INGESTION_OTLP_GRPC_ENDPOINT", "")
-	t.Setenv("TRACEALYZER_SERVICE_LOG_LEVEL", "trace")
+	t.Setenv("INGESTION_OTLP_GRPC_ENDPOINT", "")
+	t.Setenv("SERVICE_LOG_LEVEL", "trace")
 
 	path := writeTempYAML(t, []byte(`
 ingestion:
@@ -222,6 +229,55 @@ emitter:
 			t.Errorf("missing %q in error: %s", want, msg)
 		}
 	}
+}
+
+func TestValidate_RejectsBadEmitterTableTTL(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempYAML(t, []byte(`
+emitter:
+  table_ttl: "fortnight"
+`))
+
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "emitter.table_ttl") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_RejectsMissingEmitterSQLEndpoint(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempYAML(t, []byte(`
+emitter:
+  greptimedb_sql_endpoint: ""
+`))
+
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "emitter.greptimedb_sql_endpoint is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_EmitterTableTTLSupportsDaysUnit(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempYAML(t, []byte(`
+emitter:
+  table_ttl: "14d"
+`))
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	assertEqual(t, "14d", cfg.Emitter.TableTTL)
 }
 
 func writeTempYAML(t *testing.T, body []byte) string {

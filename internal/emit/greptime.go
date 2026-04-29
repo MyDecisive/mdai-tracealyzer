@@ -3,17 +3,14 @@ package emit
 import (
 	"context"
 	"fmt"
-	"net"
-	"strconv"
-	"strings"
 	"time"
 
 	gpb "github.com/GreptimeTeam/greptime-proto/go/greptime/v1"
 	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
-	gtcontext "github.com/GreptimeTeam/greptimedb-ingester-go/context"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table/types"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
+	"github.com/mydecisive/mdai-tracealyzer/internal/greptimecfg"
 	"go.uber.org/zap"
 )
 
@@ -58,12 +55,12 @@ func newGreptimeClientWithFactoryAndSleep(
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	host, port, err := splitEndpoint(cfg.GreptimeDBEndpoint)
+	host, port, err := greptimecfg.SplitEndpoint(cfg.GreptimeDBEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("parse greptimedb endpoint: %w", err)
 	}
 
-	username, password := parseAuth(cfg.GreptimeDBAuth)
+	username, password := greptimecfg.ParseAuth(cfg.GreptimeDBAuth)
 	clientCfg := greptime.NewConfig(host).
 		WithPort(port).
 		WithDatabase(cfg.GreptimeDBDatabase).
@@ -133,7 +130,7 @@ func (w *greptimeWriter) Write(ctx context.Context, batch writeBatch) error {
 		return err
 	}
 
-	resp, err := w.client.Write(withAutoCreateHint(ctx, true), tbl)
+	resp, err := w.client.Write(ctx, tbl)
 	if err != nil {
 		return err
 	}
@@ -218,38 +215,6 @@ func timestampColumns() []columnDef {
 	return []columnDef{
 		{name: "timestamp", typ: types.TIMESTAMP_NANOSECOND},
 	}
-}
-
-func withAutoCreateHint(ctx context.Context, enabled bool) context.Context {
-	return gtcontext.New(ctx, gtcontext.WithHint([]*gtcontext.Hint{
-		{
-			Key:   "auto_create_table",
-			Value: strconv.FormatBool(enabled),
-		},
-	}))
-}
-
-func splitEndpoint(endpoint string) (string, int, error) {
-	host, portStr, err := net.SplitHostPort(endpoint)
-	if err != nil {
-		return "", 0, err
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return "", 0, fmt.Errorf("port %q: %w", portStr, err)
-	}
-	return host, port, nil
-}
-
-//nolint:revive // Two strings are intentional here: GreptimeDB SDK needs username and password separately.
-func parseAuth(raw string) (string, string) {
-	if raw == "" {
-		return "", ""
-	}
-	if user, pass, ok := strings.Cut(raw, ":"); ok {
-		return user, pass
-	}
-	return "", raw
 }
 
 func responseError(resp *gpb.GreptimeResponse) error {
