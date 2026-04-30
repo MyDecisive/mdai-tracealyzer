@@ -10,26 +10,34 @@ import (
 // gate passed to NewReadiness has been marked via Mark. Marking an unknown or
 // already-marked gate is a no-op. The read path is lock-free so the readiness
 // probe handler can poll it cheaply.
+//
+// MarkShuttingDown latches Ready to false during graceful shutdown so the
+// kube load balancer can drop the pod from rotation while in-flight requests
+// drain.
 type Readiness struct {
-	ready atomic.Bool
+	ready    atomic.Bool
+	shutting atomic.Bool
 
-	mu      sync.Mutex
-	gates   map[string]bool
-	pending int
+	mu       sync.Mutex
+	gates    map[string]bool
+	pending  int
+	waitChan chan struct{}
 }
 
 // NewReadiness creates a Readiness that waits for the given gates. With no
 // gates, it is ready immediately.
 func NewReadiness(gates ...string) *Readiness {
 	r := &Readiness{
-		gates:   make(map[string]bool, len(gates)),
-		pending: len(gates),
+		gates:    make(map[string]bool, len(gates)),
+		pending:  len(gates),
+		waitChan: make(chan struct{}),
 	}
 	for _, g := range gates {
 		r.gates[g] = false
 	}
 	if r.pending == 0 {
 		r.ready.Store(true)
+		close(r.waitChan)
 	}
 	return r
 }
@@ -48,12 +56,29 @@ func (r *Readiness) Mark(gate string) {
 	r.pending--
 	if r.pending == 0 {
 		r.ready.Store(true)
+		close(r.waitChan)
 	}
 }
 
-// Ready reports whether every declared gate has been marked.
+// WaitChan closes once every gate is marked. MarkShuttingDown does not
+// close it, so callers must also select on their context.
+func (r *Readiness) WaitChan() <-chan struct{} {
+	return r.waitChan
+}
+
+// Ready reports whether every declared gate has been marked. After
+// MarkShuttingDown, Ready always returns false.
 func (r *Readiness) Ready() bool {
+	if r.shutting.Load() {
+		return false
+	}
 	return r.ready.Load()
+}
+
+// MarkShuttingDown latches Ready to false. Wire this to the supervisor's
+// pre-stop hook so /healthz/ready returns 503 while components stop.
+func (r *Readiness) MarkShuttingDown() {
+	r.shutting.Store(true)
 }
 
 // Pending returns the set of gates not yet marked, sorted alphabetically.

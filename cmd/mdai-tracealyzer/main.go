@@ -9,20 +9,18 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/cenkalti/backoff/v5"
 	"github.com/mydecisive/mdai-tracealyzer/internal/app"
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"github.com/mydecisive/mdai-tracealyzer/internal/emit"
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
 	"github.com/mydecisive/mdai-tracealyzer/internal/observability"
+	"github.com/mydecisive/mdai-tracealyzer/internal/run"
 	"github.com/mydecisive/mdai-tracealyzer/internal/schema"
 	"github.com/mydecisive/mdai-tracealyzer/internal/sweep"
-	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -33,9 +31,8 @@ const (
 	readyResponse     = "ok\n"
 	notReadyResponse  = "not ready\n"
 	readHeaderTimeout = 5 * time.Second
-	// numServers is admin + OTLP/gRPC + OTLP/HTTP — the count of serve
-	// goroutines, which sets the errCh buffer and the shutdown drain count.
-	numServers = 3
+	probeMaxBackoff   = 30 * time.Second
+	probeMultiplier   = 2.0
 )
 
 type runMode int
@@ -86,19 +83,15 @@ func mainExit(configPath string, mode runMode) int {
 		return 0
 	}
 
-	if err := run(ctx, cfg, logger); err != nil {
+	if err := serve(ctx, cfg, logger); err != nil {
 		logger.Error("service failed", zap.Error(err))
 		return 1
 	}
 	return 0
 }
 
-//nolint:funlen // TODO: split into startProbes / startIngestServers / awaitServeOrSignal / finalizeShutdown.
-func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
-	ctx, cancelRun := context.WithCancel(ctx)
-	defer cancelRun()
-
-	ready := app.NewReadiness("otlp_grpc", "otlp_http", "buffer")
+func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
+	ready := app.NewReadiness("schema", "emitter")
 	registry := observability.NewRegistry()
 	ingestMetrics := ingest.NewMetrics(registry)
 	bufferMetrics := buffer.NewMetrics(registry, ingestMetrics.MalformedDrainCounter())
@@ -116,33 +109,15 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		return fmt.Errorf("valkey buffer: %w", err)
 	}
 	defer valkeyBuffer.Close()
-	ready.Mark("buffer")
 
-	// The emitter owns an internal goroutine keyed on its own Close(ctx)
-	// lifecycle; parent cancellation must not abort an in-flight flush, so its
-	// worker deliberately does not inherit ctx.
-	emitter, err := emit.New(cfg.Emitter, logger, registry) //nolint:contextcheck
+	emitter, err := emit.New(cfg.Emitter, logger, registry)
 	if err != nil {
 		return fmt.Errorf("emitter: %w", err)
 	}
-	// Safety net for early-return paths. The main shutdown path closes the
-	// emitter explicitly under shutdownCtx; a subsequent Close on the same
-	// emitter blocks on the already-closed done channel and is idempotent.
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(
-			context.WithoutCancel(ctx), cfg.Service.ShutdownGrace.Duration(),
-		)
-		defer cancel()
-		_ = emitter.Close(closeCtx)
-	}()
 
 	schemaManager := schema.New(cfg.Emitter, logger)
-	schemaErr := waitForSchemaReady(ctx, cfg.Emitter, logger, schemaManager)
-	if schemaErr != nil {
-		return fmt.Errorf("schema readiness: %w", schemaErr)
-	}
 
-	sweeper, err := sweep.New(valkeyBuffer, topologyComputer{}, emitter, sweep.Config{
+	sweeper, err := sweep.New(valkeyBuffer, sweep.TopologyComputer{}, emitter, sweep.Config{
 		QuietPeriod:    cfg.Buffer.QuietPeriod.Duration(),
 		MaxTTL:         cfg.Buffer.MaxTTL.Duration(),
 		Interval:       cfg.Buffer.SweepInterval.Duration(),
@@ -152,14 +127,29 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		return fmt.Errorf("sweeper: %w", err)
 	}
 
-	listeners, err := openListeners(ctx, cfg)
+	adminListener, err := openAdminListener(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	admin := &adminComponent{
+		server:   newAdminServer(buildAdminMux(registry, ready)),
+		listener: adminListener,
+	}
 
-	adminServer := newAdminServer(buildAdminMux(registry, ready))
-	grpcServer := ingest.NewGRPCServer(valkeyBuffer, ingestMetrics, logger)
-	httpServer := ingest.NewHTTPServer(valkeyBuffer, ingestMetrics, logger)
+	grpcServer := ingest.NewGRPCServer(valkeyBuffer, cfg.Ingestion.OTLPGRPCEndpoint, ingestMetrics, logger)
+	httpServer := ingest.NewHTTPServer(valkeyBuffer, cfg.Ingestion.OTLPHTTPEndpoint, ingestMetrics, logger)
+
+	schemaProbe := run.NewProbe("schema", schemaManager.CheckReady,
+		func() { ready.Mark("schema") },
+		run.Backoff{Initial: cfg.Emitter.InitialBackoff.Duration(), Max: probeMaxBackoff, Multiplier: probeMultiplier},
+		logger)
+	// The schema probe only verifies the SQL endpoint; an independent probe
+	// against the gRPC write endpoint guards readiness from a misconfigured
+	// GREPTIMEDB_ENDPOINT silently dropping every emit.
+	emitterProbe := run.NewProbe("emitter", emitter.HealthCheck,
+		func() { ready.Mark("emitter") },
+		run.Backoff{Initial: cfg.Emitter.InitialBackoff.Duration(), Max: probeMaxBackoff, Multiplier: probeMultiplier},
+		logger)
 
 	logger.Info("service starting",
 		zap.String("metrics_endpoint", cfg.Service.MetricsEndpoint),
@@ -170,141 +160,72 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		zap.Duration("shutdown_grace", cfg.Service.ShutdownGrace.Duration()),
 		zap.Strings("readiness_pending", ready.Pending()),
 	)
-	var sweeperWG sync.WaitGroup
-	sweeperWG.Go(func() {
-		if err := sweeper.Run(ctx); err != nil {
-			logger.Error("sweeper exited", zap.Error(err))
-		}
-	})
 
-	errCh := make(chan serveResult, numServers)
-	go serve("admin", errCh, func() error { return adminServer.Serve(listeners.admin) })
-	go serve("otlp_grpc", errCh, func() error { return grpcServer.Serve(listeners.grpc) })
-	ready.Mark("otlp_grpc")
-	go serve("otlp_http", errCh, func() error { return httpServer.Serve(listeners.http) })
-	ready.Mark("otlp_http")
+	// Start order is registration order; Stop runs in reverse. Admin sits at
+	// position 0 so it stays serving health/metrics until everything else has
+	// drained. Emitter precedes the ingest servers and sweeper so that
+	// upstream rows still have a draining target during shutdown; on Stop the
+	// reverse order means sweeper → ingest → emitter, which matches the data
+	// flow into emitter's queue.
+	// The sweeper performs destructive reads from Valkey (Drain deletes the
+	// trace's hash before the row reaches the emitter), so it must wait for
+	// every downstream sink to confirm reachability. Otherwise a restart
+	// while readiness is still pending could Drain pre-existing finalizable
+	// traces and immediately drop them when the schema or write endpoint is
+	// not yet healthy.
+	gatedSweeper := run.NewGated(sweeper, ready.WaitChan())
 
-	var (
-		serveErr  error
-		remaining = numServers
+	sup := run.New(cfg.Service.ShutdownGrace.Duration(), logger,
+		admin,
+		schemaProbe,
+		emitter,
+		emitterProbe,
+		grpcServer,
+		httpServer,
+		gatedSweeper,
 	)
+	sup.OnShutdown(ready.MarkShuttingDown)
+	return sup.Run(ctx)
+}
+
+// adminComponent wraps the admin HTTP server with a pre-bound listener
+// so /healthz/live is reachable as soon as the supervisor enters Run.
+type adminComponent struct {
+	server   *http.Server
+	listener net.Listener
+
+	serveDone chan struct{}
+}
+
+var _ run.Component = (*adminComponent)(nil)
+
+func (*adminComponent) Name() string { return "admin" }
+
+func (a *adminComponent) Start(ctx context.Context) error {
+	a.serveDone = make(chan struct{})
+	serveErr := make(chan error, 1)
+	go func() {
+		defer close(a.serveDone)
+		err := a.server.Serve(a.listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		serveErr <- err
+	}()
+
 	select {
+	case err := <-serveErr:
+		return err
 	case <-ctx.Done():
-		logger.Info("shutdown signal received")
-	case result := <-errCh:
-		remaining = numServers - 1
-		if result.err != nil && !errors.Is(result.err, http.ErrServerClosed) {
-			serveErr = fmt.Errorf("serve %s: %w", result.name, result.err)
-		}
+		return nil
 	}
-
-	// Propagate shutdown to the sweeper goroutine when a server crash — not a
-	// signal — triggered the wind-down; SIGTERM already cancelled ctx.
-	cancelRun()
-
-	shutdownCtx, cancel := context.WithTimeout(
-		context.WithoutCancel(ctx), cfg.Service.ShutdownGrace.Duration(),
-	)
-	defer cancel()
-
-	shutdownErr := gracefulShutdown(shutdownCtx, errCh, remaining, logger, adminServer, grpcServer, httpServer)
-
-	// Wait for the sweeper's in-flight tick before closing the emitter so a
-	// late Emit cannot land after the queue starts draining; bounded by
-	// shutdownCtx so a stalled Drain cannot block exit past the grace.
-	waitForSweeper(shutdownCtx, &sweeperWG, logger)
-	if err := emitter.Close(shutdownCtx); err != nil {
-		logger.Warn("close emitter", zap.Error(err))
-	}
-
-	if serveErr != nil {
-		return serveErr
-	}
-	if shutdownErr != nil {
-		return shutdownErr
-	}
-	logger.Info("service stopped")
-	return nil
 }
 
-// topologyComputer forwards all authentic roots from topology.Compute;
-// multi-root traces yield one row per root. Orphans propagate even on the
-// ErrNoRoot branch so the sweeper records them for all-orphan traces.
-type topologyComputer struct{}
-
-func (topologyComputer) Compute(traceID [16]byte, _ string, records map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
-	spans := make(map[[8]byte]topology.Span, len(records))
-	for _, r := range records {
-		spans[r.SpanID] = topology.Span{
-			SpanID:       r.SpanID,
-			ParentSpanID: r.ParentSpanID,
-			Service:      r.Service,
-			Name:         r.Name,
-			Kind:         r.Kind,
-			StartTimeNs:  r.StartTimeNs,
-			EndTimeNs:    r.EndTimeNs,
-			StatusError:  r.StatusError,
-			OpAttrs:      r.OpAttrs,
-		}
+func (a *adminComponent) Stop(ctx context.Context) error {
+	err := a.server.Shutdown(ctx)
+	if a.serveDone != nil {
+		<-a.serveDone
 	}
-	rows, orphans := topology.Compute(traceID, spans)
-	if len(rows) == 0 && len(spans) > 0 {
-		return nil, orphans, sweep.ErrNoRoot
-	}
-	if len(rows) == 0 {
-		return nil, orphans, nil
-	}
-	return rows, orphans, nil
-}
-
-type schemaChecker interface {
-	CheckReady(ctx context.Context) error
-}
-
-func waitForSchemaReady(
-	ctx context.Context,
-	cfg config.Emitter,
-	logger *zap.Logger,
-	checker schemaChecker,
-) error {
-	maxAttempts := cfg.MaxRetries + 1
-	attempt := 0
-
-	eb := backoff.NewExponentialBackOff()
-	eb.InitialInterval = cfg.InitialBackoff.Duration()
-	eb.RandomizationFactor = 0
-	eb.Multiplier = 2
-
-	_, err := backoff.Retry(ctx, func() (struct{}, error) {
-		attempt++
-		logger.Info("attempt schema readiness check",
-			zap.Int("attempt", attempt),
-			zap.Int("max_attempts", maxAttempts),
-			zap.String("endpoint", cfg.GreptimeDBSqlEndpoint),
-			zap.String("database", cfg.GreptimeDBDatabase),
-		)
-		if err := checker.CheckReady(ctx); err != nil {
-			return struct{}{}, err
-		}
-		logger.Info("schema ready",
-			zap.Int("attempt", attempt),
-			zap.String("endpoint", cfg.GreptimeDBSqlEndpoint),
-			zap.String("database", cfg.GreptimeDBDatabase),
-		)
-		return struct{}{}, nil
-	},
-		backoff.WithBackOff(eb),
-		//nolint:gosec // config validation rejects negative MaxRetries; maxAttempts >= 1.
-		backoff.WithMaxTries(uint(maxAttempts)),
-		backoff.WithNotify(func(err error, next time.Duration) {
-			logger.Warn("schema readiness check failed; retrying",
-				zap.Int("attempt", attempt),
-				zap.Int("max_attempts", maxAttempts),
-				zap.Duration("backoff", next),
-				zap.Error(err),
-			)
-		}),
-	)
 	return err
 }
 
@@ -316,92 +237,16 @@ func buildAdminMux(registry *prometheus.Registry, ready *app.Readiness) *http.Se
 	return mux
 }
 
-type serverListeners struct {
-	admin net.Listener
-	grpc  net.Listener
-	http  net.Listener
-}
-
-// openListeners binds the three TCP endpoints in order and closes any
-// already-bound listener on a later failure so the caller does not have
-// to track per-step cleanup.
-func openListeners(ctx context.Context, cfg *config.Config) (serverListeners, error) {
+// openAdminListener binds the admin endpoint up front so the readiness
+// and metrics handlers are reachable while the OTLP servers complete
+// their own bind-and-serve in Start.
+func openAdminListener(ctx context.Context, cfg *config.Config) (net.Listener, error) {
 	var lc net.ListenConfig
-	admin, err := lc.Listen(ctx, "tcp", cfg.Service.MetricsEndpoint)
+	ln, err := lc.Listen(ctx, "tcp", cfg.Service.MetricsEndpoint)
 	if err != nil {
-		return serverListeners{}, fmt.Errorf("listen on %s: %w", cfg.Service.MetricsEndpoint, err)
+		return nil, fmt.Errorf("listen on %s: %w", cfg.Service.MetricsEndpoint, err)
 	}
-	grpcL, err := lc.Listen(ctx, "tcp", cfg.Ingestion.OTLPGRPCEndpoint)
-	if err != nil {
-		_ = admin.Close()
-		return serverListeners{}, fmt.Errorf("listen on %s: %w", cfg.Ingestion.OTLPGRPCEndpoint, err)
-	}
-	httpL, err := lc.Listen(ctx, "tcp", cfg.Ingestion.OTLPHTTPEndpoint)
-	if err != nil {
-		_ = admin.Close()
-		_ = grpcL.Close()
-		return serverListeners{}, fmt.Errorf("listen on %s: %w", cfg.Ingestion.OTLPHTTPEndpoint, err)
-	}
-	return serverListeners{admin: admin, grpc: grpcL, http: httpL}, nil
-}
-
-type serveResult struct {
-	name string
-	err  error
-}
-
-func serve(name string, errCh chan<- serveResult, serveFn func() error) {
-	errCh <- serveResult{name: name, err: serveFn()}
-}
-
-type shutdowner interface {
-	Shutdown(ctx context.Context) error
-}
-
-func shutdownServers(ctx context.Context, servers ...shutdowner) error {
-	var errs []error
-	for _, server := range servers {
-		if err := server.Shutdown(ctx); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("shutdown servers: %w", errors.Join(errs...))
-	}
-	return nil
-}
-
-func gracefulShutdown(ctx context.Context, errCh <-chan serveResult, n int, logger *zap.Logger, servers ...shutdowner) error {
-	err := shutdownServers(ctx, servers...)
-	waitForServers(ctx, errCh, n, logger)
-	return err
-}
-
-func waitForSweeper(ctx context.Context, wg *sync.WaitGroup, logger *zap.Logger) {
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		logger.Warn("timed out waiting for sweeper shutdown", zap.Error(ctx.Err()))
-	}
-}
-
-func waitForServers(ctx context.Context, errCh <-chan serveResult, n int, logger *zap.Logger) {
-	for range n {
-		select {
-		case result := <-errCh:
-			if result.err != nil && !errors.Is(result.err, http.ErrServerClosed) {
-				logger.Warn("server returned during shutdown", zap.String("server", result.name), zap.Error(result.err))
-			}
-		case <-ctx.Done():
-			logger.Warn("timed out waiting for server shutdown", zap.Error(ctx.Err()))
-			return
-		}
-	}
+	return ln, nil
 }
 
 // newAdminServer builds the admin HTTP server. BaseContext returns

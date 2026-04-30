@@ -98,8 +98,6 @@ func (e *fakeEmitter) Emit(_ context.Context, rows []topology.RootMetrics) error
 	return e.err
 }
 
-func (*fakeEmitter) Close(context.Context) error { return nil }
-
 func (e *fakeEmitter) callCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -114,7 +112,7 @@ func (e *fakeEmitter) rowsIn(call int) []topology.RootMetrics {
 
 // newSweeperForTest builds a Sweeper with a fixed wall clock, short
 // interval (unused when tests call tick directly), and a nop logger.
-func newSweeperForTest(t *testing.T, buf Buffer, c Computer, e emit.Emitter) (*Sweeper, *Metrics) {
+func newSweeperForTest(t *testing.T, buf Buffer, c Computer, e Emitter) (*Sweeper, *Metrics) {
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
@@ -621,17 +619,17 @@ func TestSweeper_Run_ReturnsOnCtxCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- s.Run(ctx) }()
+	go func() { done <- s.Start(ctx) }()
 
 	cancel()
 
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("Run: want nil, got %v", err)
+			t.Fatalf("Start: want nil, got %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Run did not return after cancel")
+		t.Fatal("Start did not return after cancel")
 	}
 }
 
@@ -664,7 +662,7 @@ func TestNew_ValidatesInputs(t *testing.T) {
 		name string
 		buf  Buffer
 		c    Computer
-		e    emit.Emitter
+		e    Emitter
 		cfg  Config
 		log  *zap.Logger
 	}{

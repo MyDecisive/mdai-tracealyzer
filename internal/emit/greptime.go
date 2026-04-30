@@ -3,21 +3,14 @@ package emit
 import (
 	"context"
 	"fmt"
-	"time"
 
 	gpb "github.com/GreptimeTeam/greptime-proto/go/greptime/v1"
 	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table/types"
-	"github.com/cenkalti/backoff/v5"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"github.com/mydecisive/mdai-tracealyzer/internal/greptimecfg"
 	"go.uber.org/zap"
-)
-
-const (
-	startupHealthCheckAttempts = 3
-	startupHealthCheckInterval = 5 * time.Second
 )
 
 type sdkClient interface {
@@ -31,8 +24,8 @@ type greptimeWriter struct {
 }
 
 //nolint:ireturn // The writer interface is the package's test seam around the GreptimeDB SDK.
-func newGreptimeWriter(cfg config.Emitter, logger *zap.Logger) (writer, error) {
-	client, err := newGreptimeClient(cfg, logger)
+func newGreptimeWriter(cfg config.Emitter, _ *zap.Logger) (writer, error) {
+	client, err := newGreptimeClient(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -40,22 +33,17 @@ func newGreptimeWriter(cfg config.Emitter, logger *zap.Logger) (writer, error) {
 }
 
 //nolint:ireturn // The GreptimeDB client is consumed through the sdkClient test seam.
-func newGreptimeClient(cfg config.Emitter, logger *zap.Logger) (sdkClient, error) {
-	return newGreptimeClientWithFactoryAndBackoff(cfg, func(clientCfg *greptime.Config) (sdkClient, error) {
+func newGreptimeClient(cfg config.Emitter) (sdkClient, error) {
+	return newGreptimeClientWithFactory(cfg, func(clientCfg *greptime.Config) (sdkClient, error) {
 		return greptime.NewClient(clientCfg)
-	}, backoff.NewConstantBackOff(startupHealthCheckInterval), logger)
+	})
 }
 
 //nolint:ireturn // The GreptimeDB client is consumed through the sdkClient test seam.
-func newGreptimeClientWithFactoryAndBackoff(
+func newGreptimeClientWithFactory(
 	cfg config.Emitter,
 	factory func(*greptime.Config) (sdkClient, error),
-	bo backoff.BackOff,
-	logger *zap.Logger,
 ) (sdkClient, error) {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
 	host, port, err := greptimecfg.SplitEndpoint(cfg.GreptimeDBEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("parse greptimedb endpoint: %w", err)
@@ -71,53 +59,7 @@ func newGreptimeClientWithFactoryAndBackoff(
 	if err != nil {
 		return nil, fmt.Errorf("create greptimedb client: %w", err)
 	}
-
-	if err := checkGreptimeHealth(client, cfg, bo, logger); err != nil {
-		_ = client.Close()
-		return nil, err
-	}
-
 	return client, nil
-}
-
-func checkGreptimeHealth(
-	client sdkClient,
-	cfg config.Emitter,
-	bo backoff.BackOff,
-	logger *zap.Logger,
-) error {
-	attempt := 0
-
-	_, err := backoff.Retry(context.Background(), func() (struct{}, error) {
-		attempt++
-		logger.Info("attempt GreptimeDB connection",
-			zap.Int("attempt", attempt),
-			zap.Int("max_attempts", startupHealthCheckAttempts),
-			zap.String("endpoint", cfg.GreptimeDBEndpoint),
-			zap.String("database", cfg.GreptimeDBDatabase),
-		)
-		ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout.Duration())
-		defer cancel()
-		if _, err := client.HealthCheck(ctx); err != nil {
-			return struct{}{}, err
-		}
-		logger.Info("connected to GreptimeDB",
-			zap.Int("attempt", attempt),
-			zap.String("endpoint", cfg.GreptimeDBEndpoint),
-			zap.String("database", cfg.GreptimeDBDatabase),
-		)
-		return struct{}{}, nil
-	},
-		backoff.WithBackOff(bo),
-		backoff.WithMaxTries(uint(startupHealthCheckAttempts)),
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"health check greptimedb after %d attempts: %w",
-			startupHealthCheckAttempts, err,
-		)
-	}
-	return nil
 }
 
 func (w *greptimeWriter) Write(ctx context.Context, batch writeBatch) error {
@@ -131,6 +73,11 @@ func (w *greptimeWriter) Write(ctx context.Context, batch writeBatch) error {
 		return err
 	}
 	return responseError(resp)
+}
+
+func (w *greptimeWriter) HealthCheck(ctx context.Context) error {
+	_, err := w.client.HealthCheck(ctx)
+	return err
 }
 
 func (w *greptimeWriter) Close() error {

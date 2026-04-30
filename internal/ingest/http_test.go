@@ -24,7 +24,7 @@ func TestHTTPServer_PostTraces_StoresRecords(t *testing.T) {
 
 	rec := &fakeRecorder{}
 	reg := prometheus.NewRegistry()
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(reg), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(reg), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -64,7 +64,7 @@ func TestHTTPServer_RejectsNonPOST(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -89,7 +89,7 @@ func TestHTTPServer_RejectsNonProtobufContentType(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -104,7 +104,7 @@ func TestHTTPServer_AcceptsProtobufContentTypeWithParams(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -129,7 +129,7 @@ func TestHTTPServer_MalformedProtobufReturns400(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -152,7 +152,7 @@ func TestHTTPServer_ReportsRejectedSpans(t *testing.T) {
 		},
 	}
 	reg := prometheus.NewRegistry()
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(reg), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(reg), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -201,7 +201,7 @@ func TestHTTPServer_ReportsClassifiedErrorMessage(t *testing.T) {
 			t.Parallel()
 
 			rec := &fakeRecorder{rejectFn: func(buffer.SpanRecord) error { return tc.putErr }}
-			server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+			server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 			url, cleanup := startHTTP(t, server)
 			t.Cleanup(cleanup)
 
@@ -232,7 +232,7 @@ func TestHTTPServer_CountsMalformedSpansAsReceived(t *testing.T) {
 
 	rec := &fakeRecorder{}
 	reg := prometheus.NewRegistry()
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(reg), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(reg), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -256,6 +256,38 @@ func TestHTTPServer_CountsMalformedSpansAsReceived(t *testing.T) {
 	}
 	if got := len(rec.snapshot()); got != 1 {
 		t.Errorf("stored %d records, want 1", got)
+	}
+}
+
+func TestHTTPServer_StartReturnsOnCtxCancelStopHalts(t *testing.T) {
+	t.Parallel()
+
+	rec := &fakeRecorder{}
+	server := ingest.NewHTTPServer(rec, "127.0.0.1:0", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	startErr := make(chan error, 1)
+	go func() { startErr <- server.Start(ctx) }()
+
+	// Give Start a moment to bind. We don't need a stronger signal because
+	// the test only asserts Start returns on cancel; bind failure would
+	// fail the test below regardless.
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return on ctx cancel")
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	if err := server.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 }
 

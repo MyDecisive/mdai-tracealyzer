@@ -10,10 +10,13 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/mydecisive/mdai-tracealyzer/internal/run"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
+
+var _ run.Component = (*HTTPServer)(nil)
 
 const (
 	tracesPath          = "/v1/traces"
@@ -27,13 +30,21 @@ const (
 
 // HTTPServer serves OTLP/HTTP at POST /v1/traces. Only
 // application/x-protobuf is accepted; application/json is deferred past v1.
+//
+// HTTPServer implements run.Component when constructed with a non-empty
+// addr (Start binds and serves). Pre-bound listeners use Serve directly.
 type HTTPServer struct {
 	server *http.Server
+	addr   string
 	logger *zap.Logger
+
+	serveDone chan struct{}
 }
 
-// NewHTTPServer builds the server without starting it; call Serve.
-func NewHTTPServer(rec Recorder, metrics *Metrics, logger *zap.Logger) *HTTPServer {
+// NewHTTPServer builds the server without starting it. addr is consumed
+// by Start; it may be empty when callers will use Serve(ln) with a
+// pre-bound listener.
+func NewHTTPServer(rec Recorder, addr string, metrics *Metrics, logger *zap.Logger) *HTTPServer {
 	mux := http.NewServeMux()
 	mux.Handle(tracesPath, &httpTraceHandler{
 		recorder: rec,
@@ -48,10 +59,30 @@ func NewHTTPServer(rec Recorder, metrics *Metrics, logger *zap.Logger) *HTTPServ
 				return context.Background()
 			},
 		},
+		addr:   addr,
 		logger: logger,
 	}
 }
 
+func (*HTTPServer) Name() string { return "otlp_http" }
+
+// Start binds addr and runs Serve until ctx cancels. It returns nil when
+// ctx cancels; Stop must be called separately to halt the underlying HTTP
+// server.
+func (s *HTTPServer) Start(ctx context.Context) error {
+	if s.addr == "" {
+		return errors.New("HTTPServer.Start: addr is empty")
+	}
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", s.addr, err)
+	}
+	return s.serveListener(ctx, ln)
+}
+
+// Serve runs the server on a pre-bound listener. The serve loop ends when
+// Shutdown is called; ctx is not consulted.
 func (s *HTTPServer) Serve(ln net.Listener) error {
 	err := s.server.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
@@ -60,8 +91,36 @@ func (s *HTTPServer) Serve(ln net.Listener) error {
 	return err
 }
 
+func (s *HTTPServer) Stop(ctx context.Context) error { return s.Shutdown(ctx) }
+
+// Shutdown gracefully stops the server. If Start was used, it also waits
+// for the inner Serve goroutine to exit.
 func (s *HTTPServer) Shutdown(ctx context.Context) error {
-	return s.server.Shutdown(ctx)
+	err := s.server.Shutdown(ctx)
+	if s.serveDone != nil {
+		<-s.serveDone
+	}
+	return err
+}
+
+func (s *HTTPServer) serveListener(ctx context.Context, ln net.Listener) error {
+	s.serveDone = make(chan struct{})
+	serveErr := make(chan error, 1)
+	go func() {
+		defer close(s.serveDone)
+		err := s.server.Serve(ln)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		serveErr <- err
+	}()
+
+	select {
+	case err := <-serveErr:
+		return err
+	case <-ctx.Done():
+		return nil
+	}
 }
 
 type httpTraceHandler struct {
