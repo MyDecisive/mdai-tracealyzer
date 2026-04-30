@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -122,6 +123,49 @@ func TestNewValkeyBuffer_Validation(t *testing.T) {
 			t.Errorf("want 'logger is required', got %v", err)
 		}
 	})
+}
+
+// Picks an address that is guaranteed to refuse: bind a listener, capture its
+// addr, then close it. Subsequent dials hit "connection refused" and the
+// retry loop runs until ctx expires.
+func unreachableAddr(t *testing.T) string {
+	t.Helper()
+	var lc net.ListenConfig
+	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := l.Addr().String()
+	if err := l.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+	return addr
+}
+
+func TestNewValkeyBuffer_DialRetriesUntilCtxDone(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zap.WarnLevel)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err := NewValkeyBuffer(ctx, ValkeyOptions{
+		Addr:   unreachableAddr(t),
+		MaxTTL: time.Minute,
+		Logger: zap.New(core),
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "valkey client") {
+		t.Errorf("want 'valkey client' wrap, got %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("want DeadlineExceeded, got %v", err)
+	}
+	if logs.FilterMessage("valkey dial failed, retrying").Len() == 0 {
+		t.Error("expected at least one retry warn log")
+	}
 }
 
 func TestSentinelFor(t *testing.T) {

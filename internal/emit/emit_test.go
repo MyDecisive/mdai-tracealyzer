@@ -160,6 +160,31 @@ func TestEmitterRetriesThenSucceeds(t *testing.T) {
 	closeEmitter(t, e)
 }
 
+func TestWriteWithRetry_ParentCancelledMidRetry(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	m, err := newMetrics(reg)
+	if err != nil {
+		t.Fatalf("newMetrics: %v", err)
+	}
+
+	writer := &fakeWriter{errs: []error{errors.New("temporary"), errors.New("temporary"), errors.New("temporary")}}
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
+	t.Cleanup(func() { closeEmitter(t, e) })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err = e.writeWithRetry(ctx, sampleRows(1))
+	if err == nil || !strings.Contains(err.Error(), "wait for retry") {
+		t.Fatalf("want 'wait for retry' wrap, got %v", err)
+	}
+	if got := testutil.ToFloat64(m.emissionsFailed); got != 1 {
+		t.Fatalf("emissionsFailed: want 1 (canceled drop), got %v", got)
+	}
+}
+
 func TestEmitterReturnsErrQueueFullAndCountsDrops(t *testing.T) {
 	t.Parallel()
 
