@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/mydecisive/mdai-tracealyzer/internal/app"
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
@@ -103,7 +104,7 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	bufferMetrics := buffer.NewMetrics(registry, ingestMetrics.MalformedDrainCounter())
 	sweepMetrics := sweep.NewMetrics(registry)
 
-	valkeyBuffer, err := buffer.NewValkeyBuffer(buffer.ValkeyOptions{
+	valkeyBuffer, err := buffer.NewValkeyBuffer(ctx, buffer.ValkeyOptions{
 		Addr:     cfg.Buffer.ValkeyAddr,
 		DB:       cfg.Buffer.ValkeyDB,
 		Password: cfg.Buffer.ValkeyPassword,
@@ -115,6 +116,7 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		return fmt.Errorf("valkey buffer: %w", err)
 	}
 	defer valkeyBuffer.Close()
+	ready.Mark("buffer")
 
 	// The emitter owns an internal goroutine keyed on its own Close(ctx)
 	// lifecycle; parent cancellation must not abort an in-flight flush, so its
@@ -135,7 +137,7 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	}()
 
 	schemaManager := schema.New(cfg.Emitter, logger)
-	schemaErr := waitForSchemaReady(ctx, cfg.Emitter, logger, schemaManager, sleepContext)
+	schemaErr := waitForSchemaReady(ctx, cfg.Emitter, logger, schemaManager)
 	if schemaErr != nil {
 		return fmt.Errorf("schema readiness: %w", schemaErr)
 	}
@@ -168,15 +170,6 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		zap.Duration("shutdown_grace", cfg.Service.ShutdownGrace.Duration()),
 		zap.Strings("readiness_pending", ready.Pending()),
 	)
-	var probeWG sync.WaitGroup
-	probeWG.Go(func() {
-		if err := valkeyBuffer.WaitUntilReady(ctx); err != nil {
-			return
-		}
-		ready.Mark("buffer")
-		logger.Info("valkey reachable; buffer ready")
-	})
-
 	var sweeperWG sync.WaitGroup
 	sweeperWG.Go(func() {
 		if err := sweeper.Run(ctx); err != nil {
@@ -214,7 +207,7 @@ func run(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	)
 	defer cancel()
 
-	shutdownErr := gracefulShutdown(shutdownCtx, errCh, remaining, &probeWG, logger, adminServer, grpcServer, httpServer)
+	shutdownErr := gracefulShutdown(shutdownCtx, errCh, remaining, logger, adminServer, grpcServer, httpServer)
 
 	// Wait for the sweeper's in-flight tick before closing the emitter so a
 	// late Emit cannot land after the queue starts draining; bounded by
@@ -273,60 +266,45 @@ func waitForSchemaReady(
 	cfg config.Emitter,
 	logger *zap.Logger,
 	checker schemaChecker,
-	sleep func(context.Context, time.Duration) error,
 ) error {
 	maxAttempts := cfg.MaxRetries + 1
-	var lastErr error
+	attempt := 0
 
-	for attempt := range maxAttempts {
-		attemptNumber := attempt + 1
+	eb := backoff.NewExponentialBackOff()
+	eb.InitialInterval = cfg.InitialBackoff.Duration()
+	eb.RandomizationFactor = 0
+	eb.Multiplier = 2
+
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
+		attempt++
 		logger.Info("attempt schema readiness check",
-			zap.Int("attempt", attemptNumber),
+			zap.Int("attempt", attempt),
 			zap.Int("max_attempts", maxAttempts),
 			zap.String("endpoint", cfg.GreptimeDBSqlEndpoint),
 			zap.String("database", cfg.GreptimeDBDatabase),
 		)
-
-		err := checker.CheckReady(ctx)
-		if err == nil {
-			logger.Info("schema ready",
-				zap.Int("attempt", attemptNumber),
-				zap.String("endpoint", cfg.GreptimeDBSqlEndpoint),
-				zap.String("database", cfg.GreptimeDBDatabase),
-			)
-			return nil
+		if err := checker.CheckReady(ctx); err != nil {
+			return struct{}{}, err
 		}
-		lastErr = err
-
-		if attempt >= cfg.MaxRetries {
-			break
-		}
-
-		backoff := cfg.InitialBackoff.Duration() * time.Duration(1<<attempt)
-		logger.Warn("schema readiness check failed; retrying",
-			zap.Int("attempt", attemptNumber),
-			zap.Int("max_attempts", maxAttempts),
-			zap.Duration("backoff", backoff),
-			zap.Error(lastErr),
+		logger.Info("schema ready",
+			zap.Int("attempt", attempt),
+			zap.String("endpoint", cfg.GreptimeDBSqlEndpoint),
+			zap.String("database", cfg.GreptimeDBDatabase),
 		)
-		if err := sleep(ctx, backoff); err != nil {
-			return fmt.Errorf("wait schema readiness retry: %w", err)
-		}
-	}
-
-	return lastErr
-}
-
-func sleepContext(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
+		return struct{}{}, nil
+	},
+		backoff.WithBackOff(eb),
+		backoff.WithMaxTries(uint(maxAttempts)),
+		backoff.WithNotify(func(err error, next time.Duration) {
+			logger.Warn("schema readiness check failed; retrying",
+				zap.Int("attempt", attempt),
+				zap.Int("max_attempts", maxAttempts),
+				zap.Duration("backoff", next),
+				zap.Error(err),
+			)
+		}),
+	)
+	return err
 }
 
 func buildAdminMux(registry *prometheus.Registry, ready *app.Readiness) *http.ServeMux {
@@ -392,10 +370,9 @@ func shutdownServers(ctx context.Context, servers ...shutdowner) error {
 	return nil
 }
 
-func gracefulShutdown(ctx context.Context, errCh <-chan serveResult, n int, probeWG *sync.WaitGroup, logger *zap.Logger, servers ...shutdowner) error {
+func gracefulShutdown(ctx context.Context, errCh <-chan serveResult, n int, logger *zap.Logger, servers ...shutdowner) error {
 	err := shutdownServers(ctx, servers...)
 	waitForServers(ctx, errCh, n, logger)
-	probeWG.Wait()
 	return err
 }
 

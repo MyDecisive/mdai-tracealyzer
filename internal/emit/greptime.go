@@ -9,6 +9,7 @@ import (
 	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table/types"
+	"github.com/cenkalti/backoff/v5"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"github.com/mydecisive/mdai-tracealyzer/internal/greptimecfg"
 	"go.uber.org/zap"
@@ -40,16 +41,16 @@ func newGreptimeWriter(cfg config.Emitter, logger *zap.Logger) (writer, error) {
 
 //nolint:ireturn // The GreptimeDB client is consumed through the sdkClient test seam.
 func newGreptimeClient(cfg config.Emitter, logger *zap.Logger) (sdkClient, error) {
-	return newGreptimeClientWithFactoryAndSleep(cfg, func(clientCfg *greptime.Config) (sdkClient, error) {
+	return newGreptimeClientWithFactoryAndBackoff(cfg, func(clientCfg *greptime.Config) (sdkClient, error) {
 		return greptime.NewClient(clientCfg)
-	}, sleepContext, logger)
+	}, backoff.NewConstantBackOff(startupHealthCheckInterval), logger)
 }
 
 //nolint:ireturn // The GreptimeDB client is consumed through the sdkClient test seam.
-func newGreptimeClientWithFactoryAndSleep(
+func newGreptimeClientWithFactoryAndBackoff(
 	cfg config.Emitter,
 	factory func(*greptime.Config) (sdkClient, error),
-	sleep func(context.Context, time.Duration) error,
+	bo backoff.BackOff,
 	logger *zap.Logger,
 ) (sdkClient, error) {
 	if logger == nil {
@@ -71,7 +72,7 @@ func newGreptimeClientWithFactoryAndSleep(
 		return nil, fmt.Errorf("create greptimedb client: %w", err)
 	}
 
-	if err := checkGreptimeHealth(client, cfg, sleep, logger); err != nil {
+	if err := checkGreptimeHealth(client, cfg, bo, logger); err != nil {
 		_ = client.Close()
 		return nil, err
 	}
@@ -82,46 +83,41 @@ func newGreptimeClientWithFactoryAndSleep(
 func checkGreptimeHealth(
 	client sdkClient,
 	cfg config.Emitter,
-	sleep func(context.Context, time.Duration) error,
+	bo backoff.BackOff,
 	logger *zap.Logger,
 ) error {
-	var lastErr error
+	attempt := 0
 
-	for attempt := range startupHealthCheckAttempts {
-		attemptNum := attempt + 1
+	_, err := backoff.Retry(context.Background(), func() (struct{}, error) {
+		attempt++
 		logger.Info("attempt GreptimeDB connection",
-			zap.Int("attempt", attemptNum),
+			zap.Int("attempt", attempt),
 			zap.Int("max_attempts", startupHealthCheckAttempts),
 			zap.String("endpoint", cfg.GreptimeDBEndpoint),
 			zap.String("database", cfg.GreptimeDBDatabase),
 		)
-
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout.Duration())
-		_, err := client.HealthCheck(ctx)
-		cancel()
-		if err == nil {
-			logger.Info("connected to GreptimeDB",
-				zap.Int("attempt", attemptNum),
-				zap.String("endpoint", cfg.GreptimeDBEndpoint),
-				zap.String("database", cfg.GreptimeDBDatabase),
-			)
-			return nil
+		defer cancel()
+		if _, err := client.HealthCheck(ctx); err != nil {
+			return struct{}{}, err
 		}
-		lastErr = err
-
-		if attempt == startupHealthCheckAttempts-1 {
-			break
-		}
-		if sleepErr := sleep(context.Background(), startupHealthCheckInterval); sleepErr != nil {
-			return fmt.Errorf("health check greptimedb: %w", sleepErr)
-		}
-	}
-
-	return fmt.Errorf(
-		"health check greptimedb after %d attempts: %w",
-		startupHealthCheckAttempts,
-		lastErr,
+		logger.Info("connected to GreptimeDB",
+			zap.Int("attempt", attempt),
+			zap.String("endpoint", cfg.GreptimeDBEndpoint),
+			zap.String("database", cfg.GreptimeDBDatabase),
+		)
+		return struct{}{}, nil
+	},
+		backoff.WithBackOff(bo),
+		backoff.WithMaxTries(uint(startupHealthCheckAttempts)),
 	)
+	if err != nil {
+		return fmt.Errorf(
+			"health check greptimedb after %d attempts: %w",
+			startupHealthCheckAttempts, err,
+		)
+	}
+	return nil
 }
 
 func (w *greptimeWriter) Write(ctx context.Context, batch writeBatch) error {

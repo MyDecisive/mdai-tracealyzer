@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"github.com/mydecisive/mdai-tracealyzer/internal/greptimecfg"
 	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
@@ -64,7 +65,6 @@ type emitter struct {
 	metrics metrics
 	writer  writer
 	now     func() time.Time
-	sleep   func(context.Context, time.Duration) error
 
 	mu     sync.Mutex
 	closed bool
@@ -96,7 +96,7 @@ func New(cfg config.Emitter, logger *zap.Logger, reg prometheus.Registerer) (Emi
 		return nil, err
 	}
 
-	return newWithWriter(cfg, logger, m, w, time.Now, sleepContext), nil
+	return newWithWriter(cfg, logger, m, w, time.Now), nil
 }
 
 func newWithWriter(
@@ -105,16 +105,12 @@ func newWithWriter(
 	m metrics,
 	w writer,
 	now func() time.Time,
-	sleep func(context.Context, time.Duration) error,
 ) *emitter {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	if now == nil {
 		now = time.Now
-	}
-	if sleep == nil {
-		sleep = sleepContext
 	}
 
 	e := &emitter{
@@ -123,7 +119,6 @@ func newWithWriter(
 		metrics: m,
 		writer:  w,
 		now:     now,
-		sleep:   sleep,
 		queue:   make(chan []topology.RootMetrics, cfg.QueueCapacity),
 		stopCh:  make(chan context.Context, 1),
 		doneCh:  make(chan struct{}),
@@ -267,29 +262,40 @@ func (e *emitter) writeWithRetry(parent context.Context, batch []topology.RootMe
 		return nil
 	}
 
-	for attempt := 0; ; attempt++ {
+	eb := backoff.NewExponentialBackOff()
+	eb.InitialInterval = e.cfg.InitialBackoff.Duration()
+	eb.RandomizationFactor = 0
+	eb.Multiplier = 2
+
+	attempt := 0
+	var lastWriteErr error
+	_, err := backoff.Retry(parent, func() (struct{}, error) {
 		ctx, cancel := context.WithTimeout(parent, e.cfg.Timeout.Duration())
-		err := e.writer.Write(ctx, makeWriteBatch(batch, e.now()))
-		cancel()
-		if err == nil {
+		defer cancel()
+		werr := e.writer.Write(ctx, makeWriteBatch(batch, e.now()))
+		if werr == nil {
 			e.logger.Debug("emit: batch written",
 				zap.String("table", greptimecfg.SourceTableName),
 				zap.Int("rows", len(batch)),
 				zap.Int("attempt", attempt))
-			return nil
+			return struct{}{}, nil
 		}
-
-		if attempt >= e.cfg.MaxRetries {
-			e.recordDroppedRows("write retries exhausted", batch, err)
-			return err
-		}
-
-		backoff := e.cfg.InitialBackoff.Duration() * time.Duration(1<<attempt)
-		if sleepErr := e.sleep(parent, backoff); sleepErr != nil {
-			e.recordDroppedRows("write retries canceled", batch, err)
-			return fmt.Errorf("wait for retry: %w", sleepErr)
-		}
+		attempt++
+		lastWriteErr = werr
+		return struct{}{}, werr
+	},
+		backoff.WithBackOff(eb),
+		backoff.WithMaxTries(uint(e.cfg.MaxRetries+1)),
+	)
+	if err == nil {
+		return nil
 	}
+	if parent.Err() != nil {
+		e.recordDroppedRows("write retries canceled", batch, lastWriteErr)
+		return fmt.Errorf("wait for retry: %w", err)
+	}
+	e.recordDroppedRows("write retries exhausted", batch, err)
+	return err
 }
 
 func (e *emitter) recordDroppedRows(reason string, rows []topology.RootMetrics, err error) {
@@ -365,18 +371,6 @@ func newMetrics(reg prometheus.Registerer) (metrics, error) {
 		counter = existing
 	}
 	return metrics{emissionsFailed: counter}, nil
-}
-
-func sleepContext(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 func (e *emitter) setErr(err error) {

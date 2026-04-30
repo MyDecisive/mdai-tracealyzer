@@ -73,7 +73,7 @@ func TestEmitterFlushesOnBatchSize(t *testing.T) {
 	}
 
 	writer := &fakeWriter{callCh: make(chan struct{}, 1)}
-	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow(), noSleep)
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -114,7 +114,7 @@ func TestEmitterFlushesOnTimer(t *testing.T) {
 	cfg.FlushInterval = config.Duration(5 * time.Millisecond)
 
 	writer := &fakeWriter{callCh: make(chan struct{}, 1)}
-	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow(), noSleep)
+	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -142,7 +142,7 @@ func TestEmitterRetriesThenSucceeds(t *testing.T) {
 		callCh: make(chan struct{}, 3),
 		errs:   []error{errors.New("temporary"), errors.New("temporary")},
 	}
-	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow(), noSleep)
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -177,7 +177,7 @@ func TestEmitterReturnsErrQueueFullAndCountsDrops(t *testing.T) {
 	core, logs := observer.New(zap.WarnLevel)
 	logger := zap.New(core)
 	writer := &fakeWriter{}
-	e := newWithWriter(cfg, logger, m, writer, fixedNow(), noSleep)
+	e := newWithWriter(cfg, logger, m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
 		t.Fatalf("first Emit: %v", emitErr)
@@ -211,7 +211,7 @@ func TestEmitterCloseFlushesPendingRows(t *testing.T) {
 	cfg.FlushInterval = config.Duration(time.Hour)
 
 	writer := &fakeWriter{callCh: make(chan struct{}, 1)}
-	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow(), noSleep)
+	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -236,7 +236,7 @@ func TestEmitterEmitAfterCloseReturnsErrClosed(t *testing.T) {
 		t.Fatalf("newMetrics: %v", err)
 	}
 
-	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, &fakeWriter{}, fixedNow(), noSleep)
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, &fakeWriter{}, fixedNow())
 	closeEmitter(t, e)
 
 	err = e.Emit(t.Context(), sampleRows(1))
@@ -262,7 +262,7 @@ func TestEmitterCloseReturnsAsyncWriteError(t *testing.T) {
 			errors.New("write failed"),
 		},
 	}
-	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow(), noSleep)
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -380,10 +380,6 @@ func testEmitterConfig() config.Emitter {
 func fixedNow() func() time.Time {
 	ts := time.Unix(1700000000, 123)
 	return func() time.Time { return ts }
-}
-
-func noSleep(context.Context, time.Duration) error {
-	return nil
 }
 
 func waitForCalls(t *testing.T, ch <-chan struct{}, want int) {
