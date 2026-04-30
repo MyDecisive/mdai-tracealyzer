@@ -9,7 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/mydecisive/mdai-tracealyzer/internal/run"
+	"github.com/mydecisive/mdai-tracealyzer/internal/sweep"
+	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -64,6 +68,50 @@ func (f *fakeComponent) Stop(_ context.Context) error {
 	f.stopCalled.Add(1)
 	f.rec.record("stop:" + f.name)
 	return f.stopErr
+}
+
+type blockingDrainBuffer struct {
+	traceID [16]byte
+
+	drainStarted chan struct{}
+	releaseDrain chan struct{}
+	startOnce    sync.Once
+}
+
+func (b *blockingDrainBuffer) Scan(ctx context.Context, _, _ time.Time) ([]buffer.Finalizable, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return []buffer.Finalizable{{TraceID: b.traceID, Trigger: buffer.TriggerQuiet}}, nil
+}
+
+func (b *blockingDrainBuffer) Drain(ctx context.Context, id [16]byte) (map[string]buffer.SpanRecord, error) {
+	b.startOnce.Do(func() { close(b.drainStarted) })
+	select {
+	case <-b.releaseDrain:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return map[string]buffer.SpanRecord{"span": {TraceID: id}}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+type staticComputer struct{}
+
+func (staticComputer) Compute(
+	_ [16]byte,
+	_ string,
+	_ map[string]buffer.SpanRecord,
+) ([]topology.RootMetrics, int32, error) {
+	return []topology.RootMetrics{{TraceID: "trace"}}, 0, nil
+}
+
+type recordingEmitter struct{}
+
+func (recordingEmitter) Emit(context.Context, []topology.RootMetrics) error {
+	return nil
 }
 
 func TestSupervisor_GracefulShutdownStopsInReverseOrder(t *testing.T) {
@@ -177,6 +225,62 @@ func TestSupervisor_PreStopRunsBeforeAnyStop(t *testing.T) {
 	}
 	if preStopIdx >= stopIdx {
 		t.Fatalf("preStop must precede stop:a: %v", events)
+	}
+}
+
+func TestSupervisor_ShutdownGraceStartsWhileSweeperDrainIsBlocked(t *testing.T) {
+	var traceID [16]byte
+	traceID[15] = 1
+
+	buf := &blockingDrainBuffer{
+		traceID:      traceID,
+		drainStarted: make(chan struct{}),
+		releaseDrain: make(chan struct{}),
+	}
+	preStop := make(chan struct{})
+	sweeper, err := sweep.New(buf, staticComputer{}, recordingEmitter{}, sweep.Config{
+		QuietPeriod:    time.Second,
+		MaxTTL:         2 * time.Second,
+		Interval:       time.Millisecond,
+		WorkerPoolSize: 1,
+	}, sweep.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	if err != nil {
+		t.Fatalf("sweep.New: %v", err)
+	}
+
+	sup := run.New(10*time.Millisecond, zap.NewNop(), sweeper)
+	sup.OnShutdown(func() { close(preStop) })
+
+	var releaseDrainOnce sync.Once
+	releaseDrain := func() { releaseDrainOnce.Do(func() { close(buf.releaseDrain) }) }
+	t.Cleanup(releaseDrain)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- sup.Run(ctx) }()
+
+	select {
+	case <-buf.drainStarted:
+	case <-time.After(time.Second):
+		t.Fatal("sweeper never reached Drain")
+	}
+
+	cancel()
+
+	select {
+	case <-preStop:
+	case <-time.After(100 * time.Millisecond):
+		releaseDrain()
+		err := <-done
+		t.Fatalf("preStop did not run while sweeper Drain was blocked; Run after release: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		releaseDrain()
+		err := <-done
+		t.Fatalf("Run did not return on shutdown grace while sweeper Drain was blocked; Run after release: %v", err)
 	}
 }
 

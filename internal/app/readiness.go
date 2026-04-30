@@ -42,8 +42,7 @@ func NewReadiness(gates ...string) *Readiness {
 	return r
 }
 
-// Mark records that a gate has satisfied its precondition. Unknown or
-// already-marked gates are ignored.
+// Mark on an unknown or already-marked gate is a no-op.
 func (r *Readiness) Mark(gate string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -66,8 +65,6 @@ func (r *Readiness) WaitChan() <-chan struct{} {
 	return r.waitChan
 }
 
-// Ready reports whether every declared gate has been marked. After
-// MarkShuttingDown, Ready always returns false.
 func (r *Readiness) Ready() bool {
 	if r.shutting.Load() {
 		return false
@@ -75,8 +72,6 @@ func (r *Readiness) Ready() bool {
 	return r.ready.Load()
 }
 
-// MarkShuttingDown latches Ready to false. Wire this to the supervisor's
-// pre-stop hook so /healthz/ready returns 503 while components stop.
 func (r *Readiness) MarkShuttingDown() {
 	r.shutting.Store(true)
 }

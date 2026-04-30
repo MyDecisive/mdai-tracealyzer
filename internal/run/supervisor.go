@@ -22,8 +22,6 @@ type Supervisor struct {
 	preStop    func()
 }
 
-// New: Start order is registration order; Stop runs in reverse. grace
-// bounds the cumulative Stop phase.
 func New(grace time.Duration, logger *zap.Logger, components ...Component) *Supervisor {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -32,6 +30,7 @@ func New(grace time.Duration, logger *zap.Logger, components ...Component) *Supe
 		components: components,
 		grace:      grace,
 		logger:     logger,
+		preStop:    func() {},
 	}
 }
 
@@ -41,9 +40,6 @@ func (s *Supervisor) OnShutdown(fn func()) {
 	s.preStop = fn
 }
 
-// Run starts every component, blocks until the first one returns or ctx
-// cancels, then stops every component under a fresh shutdown context. The
-// returned error joins the run-phase error with any stop-phase errors.
 func (s *Supervisor) Run(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	for _, c := range s.components {
@@ -56,16 +52,28 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		})
 	}
 
-	runErr := g.Wait()
+	waited := make(chan error, 1)
+	go func() { waited <- g.Wait() }()
+
+	var runErr error
+	select {
+	case runErr = <-waited:
+	case <-ctx.Done():
+		select {
+		case runErr = <-waited:
+		case <-time.After(s.grace):
+			s.logger.Warn("supervisor: components did not exit within grace; proceeding to shutdown",
+				zap.Duration("grace", s.grace))
+			runErr = ctx.Err()
+		}
+	}
 	if runErr != nil {
 		s.logger.Error("supervisor: component exited with error", zap.Error(runErr))
 	} else {
 		s.logger.Info("supervisor: all components exited cleanly")
 	}
 
-	if s.preStop != nil {
-		s.preStop()
-	}
+	s.preStop()
 
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.grace)
 	defer cancel()

@@ -23,7 +23,7 @@ type Probe struct {
 	logger  *zap.Logger
 }
 
-// NewProbe constructs a Probe. onReady may be nil.
+// NewProbe accepts a nil onReady.
 func NewProbe(name string, check func(context.Context) error, onReady func(), b Backoff, logger *zap.Logger) *Probe {
 	if logger == nil {
 		logger = zap.NewNop()

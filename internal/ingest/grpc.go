@@ -26,9 +26,6 @@ type GRPCServer struct {
 	serveDone chan struct{}
 }
 
-// NewGRPCServer builds the server without starting it. addr is consumed by
-// Start; it may be empty when callers will use Serve(ln) with a pre-bound
-// listener.
 func NewGRPCServer(rec Recorder, addr string, metrics *Metrics, logger *zap.Logger) *GRPCServer {
 	srv := grpc.NewServer(grpc.MaxRecvMsgSize(maxRequestBytes))
 	coltracepb.RegisterTraceServiceServer(srv, &grpcTraceHandler{

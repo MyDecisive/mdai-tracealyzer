@@ -39,8 +39,7 @@ type Computer interface {
 	Compute(traceID [16]byte, trigger string, spans map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error)
 }
 
-// Buffer is the subset of buffer.Buffer that the sweeper depends on. Put
-// and Close belong to the ingest and lifecycle paths respectively.
+// Buffer is the subset of buffer.Buffer that the sweeper depends on.
 type Buffer interface {
 	Scan(ctx context.Context, quietCutoff, ttlCutoff time.Time) ([]buffer.Finalizable, error)
 	Drain(ctx context.Context, traceID [16]byte) (map[string]buffer.SpanRecord, error)

@@ -146,8 +146,7 @@ func (e *Emitter) Start(ctx context.Context) error {
 	}
 }
 
-// Stop drains the queue, flushes pending rows under ctx, and closes the
-// writer. Idempotent.
+// Stop is idempotent.
 func (e *Emitter) Stop(ctx context.Context) error {
 	if !e.closed.CompareAndSwap(false, true) {
 		return nil

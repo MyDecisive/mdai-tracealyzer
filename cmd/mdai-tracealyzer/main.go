@@ -139,17 +139,18 @@ func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	grpcServer := ingest.NewGRPCServer(valkeyBuffer, cfg.Ingestion.OTLPGRPCEndpoint, ingestMetrics, logger)
 	httpServer := ingest.NewHTTPServer(valkeyBuffer, cfg.Ingestion.OTLPHTTPEndpoint, ingestMetrics, logger)
 
+	probeBackoff := run.Backoff{
+		Initial:    cfg.Emitter.InitialBackoff.Duration(),
+		Max:        probeMaxBackoff,
+		Multiplier: probeMultiplier,
+	}
 	schemaProbe := run.NewProbe("schema", schemaManager.CheckReady,
-		func() { ready.Mark("schema") },
-		run.Backoff{Initial: cfg.Emitter.InitialBackoff.Duration(), Max: probeMaxBackoff, Multiplier: probeMultiplier},
-		logger)
+		func() { ready.Mark("schema") }, probeBackoff, logger)
 	// The schema probe only verifies the SQL endpoint; an independent probe
 	// against the gRPC write endpoint guards readiness from a misconfigured
 	// GREPTIMEDB_ENDPOINT silently dropping every emit.
 	emitterProbe := run.NewProbe("emitter", emitter.HealthCheck,
-		func() { ready.Mark("emitter") },
-		run.Backoff{Initial: cfg.Emitter.InitialBackoff.Duration(), Max: probeMaxBackoff, Multiplier: probeMultiplier},
-		logger)
+		func() { ready.Mark("emitter") }, probeBackoff, logger)
 
 	logger.Info("service starting",
 		zap.String("metrics_endpoint", cfg.Service.MetricsEndpoint),
@@ -161,18 +162,15 @@ func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		zap.Strings("readiness_pending", ready.Pending()),
 	)
 
-	// Start order is registration order; Stop runs in reverse. Admin sits at
-	// position 0 so it stays serving health/metrics until everything else has
-	// drained. Emitter precedes the ingest servers and sweeper so that
-	// upstream rows still have a draining target during shutdown; on Stop the
-	// reverse order means sweeper → ingest → emitter, which matches the data
-	// flow into emitter's queue.
+	// Admin sits first so it stays serving health/metrics until everything
+	// else has drained. Emitter precedes the ingest servers and sweeper so
+	// the reverse Stop order is sweeper → ingest → emitter, which matches
+	// the data flow into emitter's queue.
 	// The sweeper performs destructive reads from Valkey (Drain deletes the
 	// trace's hash before the row reaches the emitter), so it must wait for
-	// every downstream sink to confirm reachability. Otherwise a restart
-	// while readiness is still pending could Drain pre-existing finalizable
-	// traces and immediately drop them when the schema or write endpoint is
-	// not yet healthy.
+	// every downstream sink to confirm reachability — otherwise a restart
+	// could Drain pre-existing finalizable traces and immediately drop them
+	// when the schema or write endpoint is not yet healthy.
 	gatedSweeper := run.NewGated(sweeper, ready.WaitChan())
 
 	sup := run.New(cfg.Service.ShutdownGrace.Duration(), logger,
@@ -249,9 +247,9 @@ func openAdminListener(ctx context.Context, cfg *config.Config) (net.Listener, e
 	return ln, nil
 }
 
-// newAdminServer builds the admin HTTP server. BaseContext returns
-// context.Background() so in-flight requests are cancelled only via
-// server.Shutdown's grace deadline, not by the SIGTERM-cancelled parent ctx.
+// BaseContext returns context.Background() so in-flight requests are
+// cancelled only via server.Shutdown's grace deadline, not by the
+// SIGTERM-cancelled parent ctx.
 func newAdminServer(mux http.Handler) *http.Server {
 	return &http.Server{
 		Handler:           mux,
