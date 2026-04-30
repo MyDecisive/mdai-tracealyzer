@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/GreptimeTeam/greptime-proto v0.15.0
 	github.com/GreptimeTeam/greptimedb-ingester-go v0.7.1
+	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/lib/pq v1.10.9
 	github.com/prometheus/client_golang v1.23.2
@@ -23,7 +24,6 @@ require (
 require (
 	github.com/apache/arrow/go/v17 v17.0.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

@@ -285,6 +285,7 @@ func (e *emitter) writeWithRetry(parent context.Context, batch []topology.RootMe
 		return struct{}{}, werr
 	},
 		backoff.WithBackOff(eb),
+		//nolint:gosec // config validation rejects negative MaxRetries; sum >= 1.
 		backoff.WithMaxTries(uint(e.cfg.MaxRetries+1)),
 	)
 	if err == nil {

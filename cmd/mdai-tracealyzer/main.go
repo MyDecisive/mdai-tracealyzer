@@ -294,6 +294,7 @@ func waitForSchemaReady(
 		return struct{}{}, nil
 	},
 		backoff.WithBackOff(eb),
+		//nolint:gosec // config validation rejects negative MaxRetries; maxAttempts >= 1.
 		backoff.WithMaxTries(uint(maxAttempts)),
 		backoff.WithNotify(func(err error, next time.Duration) {
 			logger.Warn("schema readiness check failed; retrying",

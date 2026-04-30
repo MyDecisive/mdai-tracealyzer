@@ -56,6 +56,7 @@ func NewValkeyBuffer(ctx context.Context, opts ValkeyOptions) (*ValkeyBuffer, er
 	return newValkeyBufferFromClient(client, opts.MaxTTL, opts.Metrics, opts.Logger), nil
 }
 
+//nolint:ireturn // valkey.Client is the package's interface to the Valkey server.
 func dialWithBackoff(ctx context.Context, opts ValkeyOptions) (valkey.Client, error) {
 	eb := backoff.NewExponentialBackOff()
 	eb.InitialInterval = dialInitialBackoff
