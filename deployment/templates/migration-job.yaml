@@ -43,8 +43,8 @@ spec:
             - --config
             - /etc/tracealyzer/config.yaml
             - --migrate
-          {{- if .Values.secrets.greptimedbAuth.existingSecret }}
           env:
+          {{- if .Values.secrets.greptimedbAuth.existingSecret }}
             - name: GREPTIMEDB_AUTH
               valueFrom:
                 secretKeyRef:

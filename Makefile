@@ -1,4 +1,4 @@
-KIND_CLUSTER_NAME ?= greptime
+KIND_CLUSTER_NAME ?= tmp
 KUBECTL_CONTEXT   ?= kind-$(KIND_CLUSTER_NAME)
 NAMESPACE         ?= mdai
 DOCKER_TAG        ?= 0.1.0
