@@ -167,20 +167,13 @@ func TestWaitForSchemaReady_ImmediateSuccess(t *testing.T) {
 
 	cfg := testEmitterConfig()
 	checker := &stubSchemaChecker{}
-	sleepCalls := 0
 
-	err := waitForSchemaReady(t.Context(), cfg, zap.NewNop(), checker, func(context.Context, time.Duration) error {
-		sleepCalls++
-		return nil
-	})
+	err := waitForSchemaReady(t.Context(), cfg, zap.NewNop(), checker)
 	if err != nil {
 		t.Fatalf("waitForSchemaReady: %v", err)
 	}
 	if checker.calls != 1 {
 		t.Fatalf("calls: want 1, got %d", checker.calls)
-	}
-	if sleepCalls != 0 {
-		t.Fatalf("sleepCalls: want 0, got %d", sleepCalls)
 	}
 }
 
@@ -194,20 +187,13 @@ func TestWaitForSchemaReady_RetryThenSuccess(t *testing.T) {
 			nil,
 		},
 	}
-	var sleeps []time.Duration
 
-	err := waitForSchemaReady(t.Context(), cfg, zap.NewNop(), checker, func(_ context.Context, d time.Duration) error {
-		sleeps = append(sleeps, d)
-		return nil
-	})
+	err := waitForSchemaReady(t.Context(), cfg, zap.NewNop(), checker)
 	if err != nil {
 		t.Fatalf("waitForSchemaReady: %v", err)
 	}
 	if checker.calls != 2 {
 		t.Fatalf("calls: want 2, got %d", checker.calls)
-	}
-	if len(sleeps) != 1 {
-		t.Fatalf("sleep count: want 1, got %d", len(sleeps))
 	}
 }
 
@@ -220,26 +206,13 @@ func TestWaitForSchemaReady_ExhaustsRetries(t *testing.T) {
 	checker := &stubSchemaChecker{
 		errs: []error{wantErr, wantErr, wantErr},
 	}
-	var sleeps []time.Duration
 
-	err := waitForSchemaReady(t.Context(), cfg, zap.NewNop(), checker, func(_ context.Context, d time.Duration) error {
-		sleeps = append(sleeps, d)
-		return nil
-	})
+	err := waitForSchemaReady(t.Context(), cfg, zap.NewNop(), checker)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("err: want %v, got %v", wantErr, err)
 	}
 	if checker.calls != 3 {
 		t.Fatalf("calls: want 3, got %d", checker.calls)
-	}
-	if len(sleeps) != 2 {
-		t.Fatalf("sleep count: want 2, got %d", len(sleeps))
-	}
-	if sleeps[0] != cfg.InitialBackoff.Duration() {
-		t.Fatalf("sleep[0]: want %v, got %v", cfg.InitialBackoff.Duration(), sleeps[0])
-	}
-	if sleeps[1] != 2*cfg.InitialBackoff.Duration() {
-		t.Fatalf("sleep[1]: want %v, got %v", 2*cfg.InitialBackoff.Duration(), sleeps[1])
 	}
 }
 
@@ -251,11 +224,9 @@ func TestWaitForSchemaReady_CancelledDuringBackoff(t *testing.T) {
 		errs: []error{errors.New("not ready")},
 	}
 	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
 
-	err := waitForSchemaReady(ctx, cfg, zap.NewNop(), checker, func(context.Context, time.Duration) error {
-		cancel()
-		return ctx.Err()
-	})
+	err := waitForSchemaReady(ctx, cfg, zap.NewNop(), checker)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err: want context canceled, got %v", err)
 	}
@@ -286,6 +257,6 @@ func testEmitterConfig() config.Emitter {
 		GreptimeDBSqlEndpoint: "greptimedb:4003",
 		GreptimeDBDatabase:    "public",
 		MaxRetries:            3,
-		InitialBackoff:        config.Duration(100 * time.Millisecond),
+		InitialBackoff:        config.Duration(time.Nanosecond),
 	}
 }

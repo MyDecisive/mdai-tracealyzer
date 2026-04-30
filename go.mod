@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/GreptimeTeam/greptime-proto v0.15.0
 	github.com/GreptimeTeam/greptimedb-ingester-go v0.7.1
+	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/lib/pq v1.10.9
 	github.com/prometheus/client_golang v1.23.2

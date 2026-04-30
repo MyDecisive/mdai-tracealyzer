@@ -73,7 +73,7 @@ func TestEmitterFlushesOnBatchSize(t *testing.T) {
 	}
 
 	writer := &fakeWriter{callCh: make(chan struct{}, 1)}
-	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow(), noSleep)
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -114,7 +114,7 @@ func TestEmitterFlushesOnTimer(t *testing.T) {
 	cfg.FlushInterval = config.Duration(5 * time.Millisecond)
 
 	writer := &fakeWriter{callCh: make(chan struct{}, 1)}
-	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow(), noSleep)
+	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -142,7 +142,7 @@ func TestEmitterRetriesThenSucceeds(t *testing.T) {
 		callCh: make(chan struct{}, 3),
 		errs:   []error{errors.New("temporary"), errors.New("temporary")},
 	}
-	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow(), noSleep)
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -158,6 +158,31 @@ func TestEmitterRetriesThenSucceeds(t *testing.T) {
 	}
 
 	closeEmitter(t, e)
+}
+
+func TestWriteWithRetry_ParentCancelledMidRetry(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	m, err := newMetrics(reg)
+	if err != nil {
+		t.Fatalf("newMetrics: %v", err)
+	}
+
+	writer := &fakeWriter{errs: []error{errors.New("temporary"), errors.New("temporary"), errors.New("temporary")}}
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
+	t.Cleanup(func() { closeEmitter(t, e) })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err = e.writeWithRetry(ctx, sampleRows(1))
+	if err == nil || !strings.Contains(err.Error(), "wait for retry") {
+		t.Fatalf("want 'wait for retry' wrap, got %v", err)
+	}
+	if got := testutil.ToFloat64(m.emissionsFailed); got != 1 {
+		t.Fatalf("emissionsFailed: want 1 (canceled drop), got %v", got)
+	}
 }
 
 func TestEmitterReturnsErrQueueFullAndCountsDrops(t *testing.T) {
@@ -177,7 +202,7 @@ func TestEmitterReturnsErrQueueFullAndCountsDrops(t *testing.T) {
 	core, logs := observer.New(zap.WarnLevel)
 	logger := zap.New(core)
 	writer := &fakeWriter{}
-	e := newWithWriter(cfg, logger, m, writer, fixedNow(), noSleep)
+	e := newWithWriter(cfg, logger, m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
 		t.Fatalf("first Emit: %v", emitErr)
@@ -211,7 +236,7 @@ func TestEmitterCloseFlushesPendingRows(t *testing.T) {
 	cfg.FlushInterval = config.Duration(time.Hour)
 
 	writer := &fakeWriter{callCh: make(chan struct{}, 1)}
-	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow(), noSleep)
+	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -236,7 +261,7 @@ func TestEmitterEmitAfterCloseReturnsErrClosed(t *testing.T) {
 		t.Fatalf("newMetrics: %v", err)
 	}
 
-	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, &fakeWriter{}, fixedNow(), noSleep)
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, &fakeWriter{}, fixedNow())
 	closeEmitter(t, e)
 
 	err = e.Emit(t.Context(), sampleRows(1))
@@ -262,7 +287,7 @@ func TestEmitterCloseReturnsAsyncWriteError(t *testing.T) {
 			errors.New("write failed"),
 		},
 	}
-	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow(), noSleep)
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
 
 	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -380,10 +405,6 @@ func testEmitterConfig() config.Emitter {
 func fixedNow() func() time.Time {
 	ts := time.Unix(1700000000, 123)
 	return func() time.Time { return ts }
-}
-
-func noSleep(context.Context, time.Duration) error {
-	return nil
 }
 
 func waitForCalls(t *testing.T, ch <-chan struct{}, want int) {

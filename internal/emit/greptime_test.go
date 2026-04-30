@@ -10,6 +10,7 @@ import (
 	gpb "github.com/GreptimeTeam/greptime-proto/go/greptime/v1"
 	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table"
+	"github.com/cenkalti/backoff/v5"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -103,9 +104,9 @@ func TestNewGreptimeClientRunsHealthCheck(t *testing.T) {
 
 	client := &fakeSDKClient{}
 	core, logs := observer.New(zap.InfoLevel)
-	got, err := newGreptimeClientWithFactoryAndSleep(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
+	got, err := newGreptimeClientWithFactoryAndBackoff(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
 		return client, nil
-	}, noSleep, zap.New(core))
+	}, &backoff.ZeroBackOff{}, zap.New(core))
 	if err != nil {
 		t.Fatalf("newGreptimeClientWithFactory: %v", err)
 	}
@@ -136,9 +137,9 @@ func TestNewGreptimeClientFailsOnHealthCheckError(t *testing.T) {
 	client := &fakeSDKClient{
 		healthErr: errors.New("unreachable"),
 	}
-	_, err := newGreptimeClientWithFactoryAndSleep(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
+	_, err := newGreptimeClientWithFactoryAndBackoff(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
 		return client, nil
-	}, noSleep, zap.NewNop())
+	}, &backoff.ZeroBackOff{}, zap.NewNop())
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -159,25 +160,18 @@ func TestNewGreptimeClientRetriesHealthCheckUntilSuccess(t *testing.T) {
 	client := &fakeSDKClient{
 		healthErrs: []error{errors.New("unreachable"), errors.New("unreachable"), nil},
 	}
-	sleepCalls := 0
 
-	got, err := newGreptimeClientWithFactoryAndSleep(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
+	got, err := newGreptimeClientWithFactoryAndBackoff(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
 		return client, nil
-	}, func(context.Context, time.Duration) error {
-		sleepCalls++
-		return nil
-	}, zap.NewNop())
+	}, &backoff.ZeroBackOff{}, zap.NewNop())
 	if err != nil {
-		t.Fatalf("newGreptimeClientWithFactoryAndSleep: %v", err)
+		t.Fatalf("newGreptimeClientWithFactoryAndBackoff: %v", err)
 	}
 	if got != client {
 		t.Fatal("expected returned client to be the factory client")
 	}
 	if client.healthCalls != 3 {
 		t.Fatalf("want 3 health checks, got %d", client.healthCalls)
-	}
-	if sleepCalls != 2 {
-		t.Fatalf("want 2 sleep calls, got %d", sleepCalls)
 	}
 	if client.closed {
 		t.Fatal("did not expect client to be closed on successful health check")
@@ -195,22 +189,15 @@ func TestNewGreptimeClientStopsAfterConfiguredHealthCheckAttempts(t *testing.T) 
 			nil,
 		},
 	}
-	sleepCalls := 0
 
-	_, err := newGreptimeClientWithFactoryAndSleep(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
+	_, err := newGreptimeClientWithFactoryAndBackoff(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
 		return client, nil
-	}, func(context.Context, time.Duration) error {
-		sleepCalls++
-		return nil
-	}, zap.NewNop())
+	}, &backoff.ZeroBackOff{}, zap.NewNop())
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if client.healthCalls != startupHealthCheckAttempts {
 		t.Fatalf("want %d health checks, got %d", startupHealthCheckAttempts, client.healthCalls)
-	}
-	if sleepCalls != startupHealthCheckAttempts-1 {
-		t.Fatalf("want %d sleep calls, got %d", startupHealthCheckAttempts-1, sleepCalls)
 	}
 	if !client.closed {
 		t.Fatal("expected client to be closed after failed health checks")

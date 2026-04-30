@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/valkey-io/valkey-go"
 	"go.uber.org/zap"
 )
@@ -15,13 +16,10 @@ import (
 const (
 	zLastWriteKey      = "traces:last_write"
 	zFirstSeenKey      = "traces:first_seen"
-	waitInitialBackoff = 10 * time.Millisecond
-	waitBackoffCap     = 30 * time.Second
-	waitBackoffFactor  = 2
+	dialInitialBackoff = 100 * time.Millisecond
+	dialMaxBackoff     = 5 * time.Second
 )
 
-// ValkeyBuffer is the production Buffer backed by a Valkey instance.
-// It satisfies the Buffer interface defined in buffer.go.
 type ValkeyBuffer struct {
 	client  valkey.Client
 	maxTTL  time.Duration
@@ -38,10 +36,9 @@ type ValkeyOptions struct {
 	Logger   *zap.Logger
 }
 
-// NewValkeyBuffer constructs the buffer but does not block on Valkey
-// reachability. Callers invoke WaitUntilReady to confirm connectivity
-// before flipping the readiness gate.
-func NewValkeyBuffer(opts ValkeyOptions) (*ValkeyBuffer, error) {
+// NewValkeyBuffer blocks until the initial dial succeeds or ctx is cancelled.
+// valkey-go owns reconnection on subsequent connection drops.
+func NewValkeyBuffer(ctx context.Context, opts ValkeyOptions) (*ValkeyBuffer, error) {
 	if opts.Addr == "" {
 		return nil, errors.New("valkey buffer: addr is required")
 	}
@@ -52,15 +49,37 @@ func NewValkeyBuffer(opts ValkeyOptions) (*ValkeyBuffer, error) {
 		return nil, errors.New("valkey buffer: logger is required")
 	}
 
-	client, err := valkey.NewClient(valkey.ClientOption{
-		InitAddress: []string{opts.Addr},
-		SelectDB:    opts.DB,
-		Password:    opts.Password,
-	})
+	client, err := dialWithBackoff(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return newValkeyBufferFromClient(client, opts.MaxTTL, opts.Metrics, opts.Logger), nil
+}
+
+//nolint:ireturn // valkey.Client is the package's interface to the Valkey server.
+func dialWithBackoff(ctx context.Context, opts ValkeyOptions) (valkey.Client, error) {
+	eb := backoff.NewExponentialBackOff()
+	eb.InitialInterval = dialInitialBackoff
+	eb.MaxInterval = dialMaxBackoff
+
+	client, err := backoff.Retry(ctx, func() (valkey.Client, error) {
+		return valkey.NewClient(valkey.ClientOption{
+			InitAddress: []string{opts.Addr},
+			SelectDB:    opts.DB,
+			Password:    opts.Password,
+		})
+	},
+		backoff.WithBackOff(eb),
+		backoff.WithMaxElapsedTime(0),
+		backoff.WithNotify(func(err error, next time.Duration) {
+			opts.Logger.Warn("valkey dial failed, retrying",
+				zap.Error(err), zap.Duration("next_attempt_in", next))
+		}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("valkey client: %w", err)
 	}
-	return newValkeyBufferFromClient(client, opts.MaxTTL, opts.Metrics, opts.Logger), nil
+	return client, nil
 }
 
 func newValkeyBufferFromClient(client valkey.Client, maxTTL time.Duration, metrics *Metrics, logger *zap.Logger) *ValkeyBuffer {
@@ -69,35 +88,6 @@ func newValkeyBufferFromClient(client valkey.Client, maxTTL time.Duration, metri
 		maxTTL:  maxTTL,
 		metrics: metrics,
 		logger:  logger,
-	}
-}
-
-// Ping runs a single PING against Valkey.
-func (b *ValkeyBuffer) Ping(ctx context.Context) error {
-	if err := b.client.Do(ctx, b.client.B().Ping().Build()).Error(); err != nil {
-		return fmt.Errorf("valkey ping: %w", err)
-	}
-	return nil
-}
-
-// WaitUntilReady pings Valkey with exponential backoff until either the
-// ping succeeds or ctx is cancelled. It returns ctx.Err() on cancellation
-// and nil on success. Each failed attempt is logged at warn level.
-func (b *ValkeyBuffer) WaitUntilReady(ctx context.Context) error {
-	backoff := waitInitialBackoff
-	for {
-		err := b.Ping(ctx)
-		if err == nil {
-			return nil
-		}
-		b.logger.Warn("valkey ping failed, retrying",
-			zap.Error(err), zap.Duration("next_attempt_in", backoff))
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
-		backoff = min(backoff*waitBackoffFactor, waitBackoffCap)
 	}
 }
 
