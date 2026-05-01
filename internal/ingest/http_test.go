@@ -2,6 +2,7 @@ package ingest_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -24,7 +25,7 @@ func TestHTTPServer_PostTraces_StoresRecords(t *testing.T) {
 
 	rec := &fakeRecorder{}
 	reg := prometheus.NewRegistry()
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(reg), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(reg), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -64,7 +65,7 @@ func TestHTTPServer_RejectsNonPOST(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -89,7 +90,7 @@ func TestHTTPServer_RejectsNonProtobufContentType(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -104,7 +105,7 @@ func TestHTTPServer_AcceptsProtobufContentTypeWithParams(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -125,11 +126,105 @@ func TestHTTPServer_AcceptsProtobufContentTypeWithParams(t *testing.T) {
 	}
 }
 
+func TestHTTPServer_PostTracesAcceptsGzipBody(t *testing.T) {
+	t.Parallel()
+
+	rec := &fakeRecorder{}
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	url, cleanup := startHTTP(t, server)
+	t.Cleanup(cleanup)
+
+	raw := mustMarshal(t, &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{
+			resourceSpans("checkout", []*tracepb.Span{
+				rootSpan(traceIDAllBytes, rootSpanID, "POST /orders",
+					tracepb.Span_SPAN_KIND_SERVER, tracepb.Status_STATUS_CODE_OK),
+			}),
+		},
+	})
+	var compressed bytes.Buffer
+	gz := gzip.NewWriter(&compressed)
+	if _, err := gz.Write(raw); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	resp := doPostWithHeaders(t, url, map[string]string{
+		"Content-Type":     "application/x-protobuf",
+		"Content-Encoding": "gzip",
+	}, compressed.Bytes())
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d (want 200), body = %q", resp.StatusCode, body)
+	}
+	if got := len(rec.snapshot()); got != 1 {
+		t.Fatalf("stored %d records, want 1", got)
+	}
+}
+
+func TestHTTPServer_RejectsUnsupportedContentEncoding(t *testing.T) {
+	t.Parallel()
+
+	rec := &fakeRecorder{}
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	url, cleanup := startHTTP(t, server)
+	t.Cleanup(cleanup)
+
+	body := mustMarshal(t, &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{
+			resourceSpans("svc", []*tracepb.Span{
+				rootSpan(traceIDAllBytes, rootSpanID, "r", tracepb.Span_SPAN_KIND_SERVER, tracepb.Status_STATUS_CODE_OK),
+			}),
+		},
+	})
+
+	resp := doPostWithHeaders(t, url, map[string]string{
+		"Content-Type":     "application/x-protobuf",
+		"Content-Encoding": "deflate",
+	}, body)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d (want 415), body = %q", resp.StatusCode, respBody)
+	}
+	if got := len(rec.snapshot()); got != 0 {
+		t.Errorf("stored %d records, want 0", got)
+	}
+}
+
+func TestHTTPServer_MalformedGzipReturns400(t *testing.T) {
+	t.Parallel()
+
+	rec := &fakeRecorder{}
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	url, cleanup := startHTTP(t, server)
+	t.Cleanup(cleanup)
+
+	resp := doPostWithHeaders(t, url, map[string]string{
+		"Content-Type":     "application/x-protobuf",
+		"Content-Encoding": "gzip",
+	}, []byte{0x1f, 0x8b, 0x00})
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d (want 400), body = %q", resp.StatusCode, respBody)
+	}
+	if got := len(rec.snapshot()); got != 0 {
+		t.Errorf("stored %d records, want 0", got)
+	}
+}
+
 func TestHTTPServer_MalformedProtobufReturns400(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -152,7 +247,7 @@ func TestHTTPServer_ReportsRejectedSpans(t *testing.T) {
 		},
 	}
 	reg := prometheus.NewRegistry()
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(reg), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(reg), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -201,7 +296,7 @@ func TestHTTPServer_ReportsClassifiedErrorMessage(t *testing.T) {
 			t.Parallel()
 
 			rec := &fakeRecorder{rejectFn: func(buffer.SpanRecord) error { return tc.putErr }}
-			server := ingest.NewHTTPServer(rec, ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+			server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 			url, cleanup := startHTTP(t, server)
 			t.Cleanup(cleanup)
 
@@ -232,7 +327,7 @@ func TestHTTPServer_CountsMalformedSpansAsReceived(t *testing.T) {
 
 	rec := &fakeRecorder{}
 	reg := prometheus.NewRegistry()
-	server := ingest.NewHTTPServer(rec, ingest.NewMetrics(reg), zap.NewNop())
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(reg), zap.NewNop())
 	url, cleanup := startHTTP(t, server)
 	t.Cleanup(cleanup)
 
@@ -256,6 +351,38 @@ func TestHTTPServer_CountsMalformedSpansAsReceived(t *testing.T) {
 	}
 	if got := len(rec.snapshot()); got != 1 {
 		t.Errorf("stored %d records, want 1", got)
+	}
+}
+
+func TestHTTPServer_StartReturnsOnCtxCancelStopHalts(t *testing.T) {
+	t.Parallel()
+
+	rec := &fakeRecorder{}
+	server := ingest.NewHTTPServer(rec, "127.0.0.1:0", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	startErr := make(chan error, 1)
+	go func() { startErr <- server.Start(ctx) }()
+
+	// Give Start a moment to bind. We don't need a stronger signal because
+	// the test only asserts Start returns on cancel; bind failure would
+	// fail the test below regardless.
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return on ctx cancel")
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	if err := server.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 }
 
@@ -287,12 +414,19 @@ func startHTTP(t *testing.T, server *ingest.HTTPServer) (string, func()) {
 
 func doPost(t *testing.T, url, contentType string, body []byte) *http.Response {
 	t.Helper()
+	return doPostWithHeaders(t, url, map[string]string{"Content-Type": contentType}, body)
+}
+
+func doPostWithHeaders(t *testing.T, url string, headers map[string]string, body []byte) *http.Response {
+	t.Helper()
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Content-Type", contentType)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)

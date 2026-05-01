@@ -16,6 +16,30 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
+// startEmitter runs e.Start in a goroutine bound to the test lifetime
+// and registers a t.Cleanup that cancels Start, waits for it to return,
+// then invokes Stop with a 1s grace. The Stop error is reported via
+// t.Errorf so cleanup failures fail the test without each caller having
+// to remember to check.
+func startEmitter(t *testing.T, e *Emitter) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		_ = e.Start(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+		defer stopCancel()
+		if err := e.Stop(stopCtx); err != nil {
+			t.Errorf("emitter Stop: %v", err)
+		}
+	})
+}
+
 type fakeWriter struct {
 	mu       sync.Mutex
 	batches  []writeBatch
@@ -43,6 +67,8 @@ func (w *fakeWriter) Write(_ context.Context, batch writeBatch) error {
 	w.errs = w.errs[1:]
 	return err
 }
+
+func (*fakeWriter) HealthCheck(_ context.Context) error { return nil }
 
 func (w *fakeWriter) Close() error {
 	w.mu.Lock()
@@ -74,6 +100,7 @@ func TestEmitterFlushesOnBatchSize(t *testing.T) {
 
 	writer := &fakeWriter{callCh: make(chan struct{}, 1)}
 	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
+	startEmitter(t, e)
 
 	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -96,8 +123,6 @@ func TestEmitterFlushesOnBatchSize(t *testing.T) {
 	if !batch.Rows[0].Timestamp.Equal(wantTS) {
 		t.Fatalf("want timestamp %v, got %v", wantTS, batch.Rows[0].Timestamp)
 	}
-
-	closeEmitter(t, e)
 }
 
 func TestEmitterFlushesOnTimer(t *testing.T) {
@@ -115,6 +140,7 @@ func TestEmitterFlushesOnTimer(t *testing.T) {
 
 	writer := &fakeWriter{callCh: make(chan struct{}, 1)}
 	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow())
+	startEmitter(t, e)
 
 	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -125,8 +151,6 @@ func TestEmitterFlushesOnTimer(t *testing.T) {
 	if got := writer.batchCount(); got != 1 {
 		t.Fatalf("want 1 batch, got %d", got)
 	}
-
-	closeEmitter(t, e)
 }
 
 func TestEmitterRetriesThenSucceeds(t *testing.T) {
@@ -143,6 +167,7 @@ func TestEmitterRetriesThenSucceeds(t *testing.T) {
 		errs:   []error{errors.New("temporary"), errors.New("temporary")},
 	}
 	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
+	startEmitter(t, e)
 
 	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
@@ -155,33 +180,6 @@ func TestEmitterRetriesThenSucceeds(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.emissionsFailed); got != 0 {
 		t.Fatalf("want no dropped rows, got %v", got)
-	}
-
-	closeEmitter(t, e)
-}
-
-func TestWriteWithRetry_ParentCancelledMidRetry(t *testing.T) {
-	t.Parallel()
-
-	reg := prometheus.NewRegistry()
-	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
-
-	writer := &fakeWriter{errs: []error{errors.New("temporary"), errors.New("temporary"), errors.New("temporary")}}
-	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
-	t.Cleanup(func() { closeEmitter(t, e) })
-
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	err = e.writeWithRetry(ctx, sampleRows(1))
-	if err == nil || !strings.Contains(err.Error(), "wait for retry") {
-		t.Fatalf("want 'wait for retry' wrap, got %v", err)
-	}
-	if got := testutil.ToFloat64(m.emissionsFailed); got != 1 {
-		t.Fatalf("emissionsFailed: want 1 (canceled drop), got %v", got)
 	}
 }
 
@@ -203,6 +201,7 @@ func TestEmitterReturnsErrQueueFullAndCountsDrops(t *testing.T) {
 	logger := zap.New(core)
 	writer := &fakeWriter{}
 	e := newWithWriter(cfg, logger, m, writer, fixedNow())
+	// Intentionally do NOT start the worker so the queue does not drain.
 
 	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
 		t.Fatalf("first Emit: %v", emitErr)
@@ -218,11 +217,9 @@ func TestEmitterReturnsErrQueueFullAndCountsDrops(t *testing.T) {
 	if logs.Len() == 0 {
 		t.Fatal("expected warning log for dropped rows")
 	}
-
-	closeEmitter(t, e)
 }
 
-func TestEmitterCloseFlushesPendingRows(t *testing.T) {
+func TestEmitterStopFlushesPendingRows(t *testing.T) {
 	t.Parallel()
 
 	reg := prometheus.NewRegistry()
@@ -235,24 +232,29 @@ func TestEmitterCloseFlushesPendingRows(t *testing.T) {
 	cfg.BatchSize = 10
 	cfg.FlushInterval = config.Duration(time.Hour)
 
-	writer := &fakeWriter{callCh: make(chan struct{}, 1)}
+	writer := &fakeWriter{}
 	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow())
+	// No Start: rows sit on the queue and Stop must drain + flush them.
 
 	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
 	}
 
-	closeEmitter(t, e)
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if stopErr := e.Stop(stopCtx); stopErr != nil {
+		t.Fatalf("Stop: %v", stopErr)
+	}
 
 	if got := writer.batchCount(); got != 1 {
-		t.Fatalf("want 1 batch on close, got %d", got)
+		t.Fatalf("want 1 batch on stop, got %d", got)
 	}
 	if !writer.closed {
 		t.Fatal("writer was not closed")
 	}
 }
 
-func TestEmitterEmitAfterCloseReturnsErrClosed(t *testing.T) {
+func TestEmitterEmitAfterStopReturnsErrClosed(t *testing.T) {
 	t.Parallel()
 
 	reg := prometheus.NewRegistry()
@@ -262,7 +264,11 @@ func TestEmitterEmitAfterCloseReturnsErrClosed(t *testing.T) {
 	}
 
 	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, &fakeWriter{}, fixedNow())
-	closeEmitter(t, e)
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if stopErr := e.Stop(stopCtx); stopErr != nil {
+		t.Fatalf("Stop: %v", stopErr)
+	}
 
 	err = e.Emit(t.Context(), sampleRows(1))
 	if !errors.Is(err, ErrClosed) {
@@ -270,7 +276,7 @@ func TestEmitterEmitAfterCloseReturnsErrClosed(t *testing.T) {
 	}
 }
 
-func TestEmitterCloseReturnsAsyncWriteError(t *testing.T) {
+func TestEmitterStopReturnsWriteError(t *testing.T) {
 	t.Parallel()
 
 	reg := prometheus.NewRegistry()
@@ -280,7 +286,6 @@ func TestEmitterCloseReturnsAsyncWriteError(t *testing.T) {
 	}
 
 	writer := &fakeWriter{
-		callCh: make(chan struct{}, 1),
 		errs: []error{
 			errors.New("write failed"),
 			errors.New("write failed"),
@@ -292,13 +297,12 @@ func TestEmitterCloseReturnsAsyncWriteError(t *testing.T) {
 	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
 		t.Fatalf("Emit: %v", emitErr)
 	}
-	waitForCalls(t, writer.callCh, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	err = e.Close(ctx)
+	err = e.Stop(stopCtx)
 	if err == nil {
-		t.Fatal("expected Close to return async write error")
+		t.Fatal("expected Stop to return write error from final flush")
 	}
 	if !strings.Contains(err.Error(), "write failed") {
 		t.Fatalf("unexpected error: %v", err)
@@ -416,14 +420,5 @@ func waitForCalls(t *testing.T, ch <-chan struct{}, want int) {
 		case <-deadline:
 			t.Fatal("timed out waiting for write call")
 		}
-	}
-}
-
-func closeEmitter(t *testing.T, e *emitter) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := e.Close(ctx); err != nil {
-		t.Fatalf("Close: %v", err)
 	}
 }

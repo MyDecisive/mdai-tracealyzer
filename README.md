@@ -4,7 +4,7 @@ Trace topology service — computes structural metrics from OTLP traces and writ
 
 ## What it does
 
-The v1 target: ingest OTLP spans (gRPC on `4317`, HTTP on `4318`), buffer them per trace in Valkey, and — once a trace is quiet for long enough or hits its max TTL — compute topology metrics (breadth, service-hop depth, service/operation/span/error counts, root duration) and write one row per root to the `trace_root_topology` table in GreptimeDB. A dashboard built on that table surfaces traces worth keeping for tail-sampling decisions.
+The v1 target: ingest OTLP spans (gRPC on `4317`, HTTP on `4318`), buffer them per trace in Valkey, and — once a trace is quiet for long enough or hits its max TTL — compute topology metrics (breadth, service-hop depth, service/operation/span/error counts, root duration) and write one row per root to the `trace_root_topology` table in GreptimeDB. A continuous Greptime FLOW (`trace_root_topology_1m_flow`) pre-aggregates those rows into `trace_root_topology_1m`, which holds 1-minute UDDSketches for breadth, service-hop depth, and root duration alongside `trace_count` and `error_count_total`, keyed by `root_id`. Dashboards consume the raw rows and the 1-minute sketches to surface traces worth keeping for tail-sampling decisions.
 
 The service does not make the sampling decision itself, store full trace data, render the dashboard, or alert. Span-link handling and genuinely multi-root traces are deferred past v1.
 
@@ -173,6 +173,11 @@ Configuration is a YAML file overridable by environment variables:
 - YAML path: `/etc/tracealyzer/config.yaml` by default, or `--config <path>`.
 - Env-var naming: `<SECTION>_<FIELD>` (e.g. `BUFFER_VALKEY_ADDR`, `SERVICE_LOG_LEVEL`).
 - Every YAML field can be overridden by its corresponding env var.
+
+### CLI flags
+
+- `--config <path>` — path to the YAML config file.
+- `--migrate` — create or verify the GreptimeDB schema objects (`trace_root_topology`, `trace_root_topology_1m`, `trace_root_topology_1m_flow`) and exit. The Helm chart runs the binary with this flag from a `post-install,post-upgrade` Job (`deployment/templates/migration-job.yaml`, gated by `migrationJob.enabled`, default `true`) so the schema is in place before the Deployment becomes ready. Run it manually for out-of-cluster bootstraps.
 
 ### Env-only secrets
 

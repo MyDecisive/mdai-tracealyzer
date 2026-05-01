@@ -9,10 +9,19 @@ import (
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
-	"github.com/mydecisive/mdai-tracealyzer/internal/emit"
+	"github.com/mydecisive/mdai-tracealyzer/internal/run"
 	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"go.uber.org/zap"
 )
+
+var _ run.Component = (*Sweeper)(nil)
+
+// Emitter is the narrow contract the sweeper depends on. The full emitter
+// in package emit also has Component lifecycle methods, which the sweeper
+// does not invoke.
+type Emitter interface {
+	Emit(ctx context.Context, rows []topology.RootMetrics) error
+}
 
 // ErrNoRoot is the sentinel a Computer returns when a trace has no
 // discoverable root span. The sweeper treats it as an expected skip,
@@ -30,8 +39,7 @@ type Computer interface {
 	Compute(traceID [16]byte, trigger string, spans map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error)
 }
 
-// Buffer is the subset of buffer.Buffer that the sweeper depends on. Put
-// and Close belong to the ingest and lifecycle paths respectively.
+// Buffer is the subset of buffer.Buffer that the sweeper depends on.
 type Buffer interface {
 	Scan(ctx context.Context, quietCutoff, ttlCutoff time.Time) ([]buffer.Finalizable, error)
 	Drain(ctx context.Context, traceID [16]byte) (map[string]buffer.SpanRecord, error)
@@ -48,14 +56,14 @@ type Config struct {
 type Sweeper struct {
 	buf      Buffer
 	computer Computer
-	emitter  emit.Emitter
+	emitter  Emitter
 	cfg      Config
 	metrics  *Metrics
 	logger   *zap.Logger
 	now      func() time.Time
 }
 
-func New(buf Buffer, c Computer, e emit.Emitter, cfg Config, m *Metrics, logger *zap.Logger) (*Sweeper, error) {
+func New(buf Buffer, c Computer, e Emitter, cfg Config, m *Metrics, logger *zap.Logger) (*Sweeper, error) {
 	if buf == nil {
 		return nil, errors.New("sweep: buffer is required")
 	}
@@ -91,9 +99,12 @@ func New(buf Buffer, c Computer, e emit.Emitter, cfg Config, m *Metrics, logger 
 	}, nil
 }
 
-// Run returns nil on graceful shutdown; a non-nil return would be a
-// setup bug (no such path exists today).
-func (s *Sweeper) Run(ctx context.Context) error {
+func (*Sweeper) Name() string { return "sweeper" }
+
+// Start runs the tick loop until ctx cancels. On cancel it blocks until
+// any in-flight tick completes — tick uses context.WithoutCancel
+// internally to keep the Drain → Emit pair atomic across SIGTERM.
+func (s *Sweeper) Start(ctx context.Context) error {
 	t := time.NewTicker(s.cfg.Interval)
 	defer t.Stop()
 	for {
@@ -105,6 +116,9 @@ func (s *Sweeper) Run(ctx context.Context) error {
 		}
 	}
 }
+
+// Stop is a no-op: Start has already cleaned up by the time it returns.
+func (*Sweeper) Stop(_ context.Context) error { return nil }
 
 func (s *Sweeper) tick(parent context.Context) {
 	now := s.now()

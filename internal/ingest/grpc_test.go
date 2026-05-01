@@ -55,7 +55,7 @@ func TestGRPCServer_Export_StoresNormalizedRecords(t *testing.T) {
 	rec := &fakeRecorder{}
 	reg := prometheus.NewRegistry()
 	metrics := ingest.NewMetrics(reg)
-	server := ingest.NewGRPCServer(rec, metrics, zap.NewNop())
+	server := ingest.NewGRPCServer(rec, "", metrics, zap.NewNop())
 
 	client, cleanup := dialGRPC(t, server)
 	t.Cleanup(cleanup)
@@ -94,7 +94,7 @@ func TestGRPCServer_Export_AcceptsGzipCompression(t *testing.T) {
 	rec := &fakeRecorder{}
 	reg := prometheus.NewRegistry()
 	metrics := ingest.NewMetrics(reg)
-	server := ingest.NewGRPCServer(rec, metrics, zap.NewNop())
+	server := ingest.NewGRPCServer(rec, "", metrics, zap.NewNop())
 
 	client, cleanup := dialGRPC(t, server)
 	t.Cleanup(cleanup)
@@ -131,7 +131,7 @@ func TestGRPCServer_Export_ReportsRejectedSpans(t *testing.T) {
 	}
 	reg := prometheus.NewRegistry()
 	metrics := ingest.NewMetrics(reg)
-	server := ingest.NewGRPCServer(rec, metrics, zap.NewNop())
+	server := ingest.NewGRPCServer(rec, "", metrics, zap.NewNop())
 
 	client, cleanup := dialGRPC(t, server)
 	t.Cleanup(cleanup)
@@ -162,7 +162,7 @@ func TestGRPCServer_Shutdown_StopsServer(t *testing.T) {
 
 	rec := &fakeRecorder{}
 	metrics := ingest.NewMetrics(prometheus.NewRegistry())
-	server := ingest.NewGRPCServer(rec, metrics, zap.NewNop())
+	server := ingest.NewGRPCServer(rec, "", metrics, zap.NewNop())
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -186,6 +186,36 @@ func TestGRPCServer_Shutdown_StopsServer(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Serve did not return after Shutdown")
+	}
+}
+
+func TestGRPCServer_StartReturnsOnCtxCancelStopHalts(t *testing.T) {
+	t.Parallel()
+
+	rec := &fakeRecorder{}
+	metrics := ingest.NewMetrics(prometheus.NewRegistry())
+	server := ingest.NewGRPCServer(rec, "127.0.0.1:0", metrics, zap.NewNop())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	startErr := make(chan error, 1)
+	go func() { startErr <- server.Start(ctx) }()
+
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return on ctx cancel")
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	if err := server.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 }
 
