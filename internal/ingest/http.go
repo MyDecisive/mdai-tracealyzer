@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/run"
@@ -123,6 +125,35 @@ func (s *HTTPServer) serveListener(ctx context.Context, ln net.Listener) error {
 	}
 }
 
+func readDecodedBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	var src io.Reader = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+	switch enc := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))); enc {
+	case "", "identity":
+	case "gzip":
+		gz, err := gzip.NewReader(src)
+		if err != nil {
+			http.Error(w, "decode gzip: "+err.Error(), http.StatusBadRequest)
+			return nil, false
+		}
+		defer func() { _ = gz.Close() }()
+		src = io.LimitReader(gz, maxRequestBytes+1)
+	default:
+		http.Error(w, fmt.Sprintf("unsupported content-encoding %q", enc), http.StatusUnsupportedMediaType)
+		return nil, false
+	}
+
+	body, err := io.ReadAll(src)
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+	if len(body) > maxRequestBytes {
+		http.Error(w, "decoded body exceeds size limit", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	return body, true
+}
+
 type httpTraceHandler struct {
 	recorder Recorder
 	metrics  *Metrics
@@ -142,9 +173,8 @@ func (h *httpTraceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
-	if err != nil {
-		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+	body, ok := readDecodedBody(w, r)
+	if !ok {
 		return
 	}
 
