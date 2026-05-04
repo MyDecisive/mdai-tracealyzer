@@ -86,10 +86,7 @@ func apportionedSpanSizes(rs *tracepb.ResourceSpans) ([]*tracepb.Span, []int64) 
 		return nil, nil
 	}
 
-	overhead := int64(proto.Size(rs)) - spanSum
-	if overhead < 0 {
-		overhead = 0
-	}
+	overhead := max(int64(proto.Size(rs))-spanSum, 0)
 	n := int64(len(spans))
 	base, rem := overhead/n, overhead%n
 	for i := range sizes {

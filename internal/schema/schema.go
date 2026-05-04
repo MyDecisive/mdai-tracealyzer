@@ -153,8 +153,7 @@ FROM %s
 GROUP BY time_window, root_id`, flowName, sinkTableName, sourceTableName)
 }
 
-//nolint:ireturn // Intentional interface seam for DB mocking in unit tests.
-func (m *Manager) connect(ctx context.Context) (sqlConn, error) {
+func (m *Manager) connect(ctx context.Context) (sqlConn, error) { //nolint:ireturn // Intentional interface seam for DB mocking in unit tests.
 	dsn, err := buildPostgresDSN(m.cfg)
 	if err != nil {
 		return nil, err
@@ -193,9 +192,8 @@ type sqlDB struct {
 	*sql.DB
 }
 
-//nolint:ireturn,rowserrcheck // Intentional interface seam for DB mocking in unit tests.
-func (db sqlDB) QueryContext(ctx context.Context, query string, args ...any) (rowSet, error) {
-	return db.DB.QueryContext(ctx, query, args...)
+func (db sqlDB) QueryContext(ctx context.Context, query string, args ...any) (rowSet, error) { //nolint:ireturn // Intentional interface seam for DB mocking in unit tests.
+	return db.DB.QueryContext(ctx, query, args...) //nolint:rowserrcheck // caller checks rows.Err via rowSet.Err.
 }
 
 //nolint:ireturn // Intentional interface seam for DB mocking in unit tests.
