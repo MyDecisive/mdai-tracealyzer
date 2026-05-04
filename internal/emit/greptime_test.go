@@ -165,15 +165,16 @@ func TestBuildTableMapsSchema(t *testing.T) {
 		t.Fatalf("want table trace_root_topology, got %q", req.GetTableName())
 	}
 	schema := req.GetRows().GetSchema()
-	if got := len(schema); got != 12 {
-		t.Fatalf("want 12 columns, got %d", got)
+	if got := len(schema); got != 13 {
+		t.Fatalf("want 13 columns, got %d", got)
 	}
 
 	checkColumn(t, schema[0], "root_id", gpb.SemanticType_TAG, gpb.ColumnDataType_STRING)
 	checkColumn(t, schema[1], "trace_id", gpb.SemanticType_TAG, gpb.ColumnDataType_STRING)
 	checkColumn(t, schema[2], "root_service", gpb.SemanticType_FIELD, gpb.ColumnDataType_STRING)
 	checkColumn(t, schema[3], "root_operation", gpb.SemanticType_FIELD, gpb.ColumnDataType_STRING)
-	checkColumn(t, schema[11], "timestamp", gpb.SemanticType_TIMESTAMP, gpb.ColumnDataType_TIMESTAMP_NANOSECOND)
+	checkColumn(t, schema[11], "span_bytes_total", gpb.SemanticType_FIELD, gpb.ColumnDataType_INT64)
+	checkColumn(t, schema[12], "timestamp", gpb.SemanticType_TIMESTAMP, gpb.ColumnDataType_TIMESTAMP_NANOSECOND)
 }
 
 func checkColumn(t *testing.T, col *gpb.ColumnSchema, name string, semantic gpb.SemanticType, typ gpb.ColumnDataType) {

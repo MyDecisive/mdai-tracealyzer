@@ -27,6 +27,7 @@ func (TopologyComputer) Compute(traceID [16]byte, _ string, records map[string]b
 			StartTimeNs:  r.StartTimeNs,
 			EndTimeNs:    r.EndTimeNs,
 			StatusError:  r.StatusError,
+			SizeBytes:    r.SizeBytes,
 			OpAttrs:      r.OpAttrs,
 		}
 	}

@@ -43,6 +43,7 @@ type row struct {
 	SpanCount       int32
 	ErrorCount      int32
 	RootDurationNS  int64
+	SpanBytesTotal  int64
 }
 
 type writeBatch struct {
@@ -302,6 +303,7 @@ func makeWriteBatch(rows []topology.RootMetrics, ts time.Time) writeBatch {
 			SpanCount:       r.SpanCount,
 			ErrorCount:      r.ErrorCount,
 			RootDurationNS:  r.RootDurationNS,
+			SpanBytesTotal:  r.SpanBytesTotal,
 		})
 	}
 	return writeBatch{

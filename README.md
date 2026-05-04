@@ -4,7 +4,7 @@ Trace topology service — computes structural metrics from OTLP traces and writ
 
 ## What it does
 
-The v1 target: ingest OTLP spans (gRPC on `4317`, HTTP on `4318`), buffer them per trace in Valkey, and — once a trace is quiet for long enough or hits its max TTL — compute topology metrics (breadth, service-hop depth, service/operation/span/error counts, root duration) and write one row per root to the `trace_root_topology` table in GreptimeDB. A continuous Greptime FLOW (`trace_root_topology_1m_flow`) pre-aggregates those rows into `trace_root_topology_1m`, which holds 1-minute UDDSketches for breadth, service-hop depth, and root duration alongside `trace_count` and `error_count_total`, keyed by `root_id`. Dashboards consume the raw rows and the 1-minute sketches to surface traces worth keeping for tail-sampling decisions.
+The v1 target: ingest OTLP spans (gRPC on `4317`, HTTP on `4318`), buffer them per trace in Valkey, and — once a trace is quiet for long enough or hits its max TTL — compute topology metrics (breadth, service-hop depth, service/operation/span/error counts, root duration, attributed OTLP span bytes) and write one row per root to the `trace_root_topology` table in GreptimeDB. A continuous Greptime FLOW (`trace_root_topology_1m_flow`) pre-aggregates those rows into `trace_root_topology_1m`, which holds 1-minute UDDSketches for breadth, service-hop depth, and root duration alongside `trace_count`, `error_count_total`, `span_count_total`, and `span_bytes_total`, keyed by `root_id` within each 1-minute `time_window`. Dashboards consume the raw rows and the 1-minute sketches to surface traces worth keeping for tail-sampling decisions; `span_bytes_total` is the proxy for Datadog APM ingestion bytes per root.
 
 The service does not make the sampling decision itself, store full trace data, render the dashboard, or alert. Span-link handling and genuinely multi-root traces are deferred past v1.
 
@@ -130,6 +130,7 @@ The `topology_` metrics exposed are:
 - `topology_compute_errors_total` — compute failures other than `ErrNoRoot`; non-zero indicates a bug for a specific trace shape.
 - `topology_compute_skipped_total{reason="no_root"}` — traces skipped for a known reason during compute.
 - `topology_orphan_spans_total` — spans unreachable from any root.
+- `topology_orphan_bytes_total` — apportioned OTLP byte share of orphan spans; surfaces under-counts in per-root `span_bytes_total` at the org level.
 - `topology_compute_duration_seconds` (histogram) — per-trace compute latency.
 
 **Emit:**

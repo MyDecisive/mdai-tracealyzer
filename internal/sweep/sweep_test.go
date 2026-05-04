@@ -646,7 +646,150 @@ func TestNewMetrics_NilRegisterer(t *testing.T) {
 	m.incComputeError()
 	m.incComputeSkipped(reasonNoRoot)
 	m.addOrphanSpans(3)
+	m.addOrphanBytes(123)
 	m.observeComputeDuration(time.Millisecond)
+}
+
+func TestOrphanBytes_TotalMinusAttributed(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		spans map[string]buffer.SpanRecord
+		rows  []topology.RootMetrics
+		want  int64
+	}{
+		{
+			name: "all reachable: zero",
+			spans: map[string]buffer.SpanRecord{
+				"a": {SizeBytes: 100},
+				"b": {SizeBytes: 50},
+			},
+			rows: []topology.RootMetrics{{SpanBytesTotal: 150}},
+			want: 0,
+		},
+		{
+			name: "some orphan: total minus attributed",
+			spans: map[string]buffer.SpanRecord{
+				"a": {SizeBytes: 100},
+				"b": {SizeBytes: 50},
+				"c": {SizeBytes: 30},
+			},
+			rows: []topology.RootMetrics{{SpanBytesTotal: 100}},
+			want: 80,
+		},
+		{
+			name: "no rows (all orphan): full total",
+			spans: map[string]buffer.SpanRecord{
+				"a": {SizeBytes: 100},
+				"b": {SizeBytes: 50},
+			},
+			rows: nil,
+			want: 150,
+		},
+		{
+			name: "attributed exceeds total: clamped to zero",
+			spans: map[string]buffer.SpanRecord{
+				"a": {SizeBytes: 10},
+			},
+			rows: []topology.RootMetrics{{SpanBytesTotal: 999}},
+			want: 0,
+		},
+		{
+			name:  "empty inputs",
+			spans: nil,
+			rows:  nil,
+			want:  0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := orphanBytes(tc.spans, tc.rows); got != tc.want {
+				t.Fatalf("orphanBytes: want %d, got %d", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestSweeper_AllOrphan_BytesGoToOrphanMetricNotRow(t *testing.T) {
+	t.Parallel()
+
+	a := traceID(1)
+	buf := &fakeBuffer{
+		scanResult: []buffer.Finalizable{{TraceID: a, Trigger: buffer.TriggerMaxTTL}},
+		drainSpans: map[[16]byte]map[string]buffer.SpanRecord{
+			a: {
+				"orphan-1": {TraceID: a, SizeBytes: 200},
+				"orphan-2": {TraceID: a, SizeBytes: 350},
+			},
+		},
+	}
+	comp := &fakeComputer{
+		results: map[[16]byte]computeResult{
+			a: {orphans: 2, err: ErrNoRoot},
+		},
+	}
+	em := &fakeEmitter{}
+	s, m := newSweeperForTest(t, buf, comp, em)
+
+	s.tick(context.Background())
+
+	if got := testutil.ToFloat64(m.computeSkipped.WithLabelValues(reasonNoRoot)); got != 1 {
+		t.Fatalf("compute_skipped{no_root}: want 1, got %v", got)
+	}
+	if got := testutil.ToFloat64(m.orphanSpans); got != 2 {
+		t.Fatalf("orphan_spans: want 2, got %v", got)
+	}
+	if got := testutil.ToFloat64(m.orphanBytes); got != 550 {
+		t.Fatalf("orphan_bytes: want 550 (200+350), got %v", got)
+	}
+	if em.callCount() != 0 {
+		t.Fatalf("Emit calls: want 0 on ErrNoRoot, got %d", em.callCount())
+	}
+}
+
+func TestSweeper_PartialOrphan_BytesAccountedAtMetric(t *testing.T) {
+	t.Parallel()
+
+	a := traceID(1)
+	buf := &fakeBuffer{
+		scanResult: []buffer.Finalizable{{TraceID: a, Trigger: buffer.TriggerQuiet}},
+		drainSpans: map[[16]byte]map[string]buffer.SpanRecord{
+			a: {
+				"reachable-1": {TraceID: a, SizeBytes: 100},
+				"reachable-2": {TraceID: a, SizeBytes: 200},
+				"orphan-1":    {TraceID: a, SizeBytes: 75},
+			},
+		},
+	}
+	// Computer reports a row whose attributed bytes (300) covers two of the
+	// three drained spans; the third (75 bytes) is orphan.
+	comp := &fakeComputer{
+		results: map[[16]byte]computeResult{
+			a: {
+				rows:    []topology.RootMetrics{{TraceID: "a", SpanBytesTotal: 300}},
+				orphans: 1,
+			},
+		},
+	}
+	em := &fakeEmitter{}
+	s, m := newSweeperForTest(t, buf, comp, em)
+
+	s.tick(context.Background())
+
+	if got := testutil.ToFloat64(m.orphanSpans); got != 1 {
+		t.Fatalf("orphan_spans: want 1, got %v", got)
+	}
+	if got := testutil.ToFloat64(m.orphanBytes); got != 75 {
+		t.Fatalf("orphan_bytes: want 75 (375-300), got %v", got)
+	}
+	if em.callCount() != 1 {
+		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
+	}
+	if rows := em.rowsIn(0); len(rows) != 1 || rows[0].SpanBytesTotal != 300 {
+		t.Fatalf("emitted rows: want 1 row with SpanBytesTotal=300, got %+v", rows)
+	}
 }
 
 func TestNew_ValidatesInputs(t *testing.T) {

@@ -117,6 +117,7 @@ func createSourceTableSQL(ttl string) string {
   span_count        INT,
   error_count       INT,
   root_duration_ns  BIGINT,
+  span_bytes_total  BIGINT,
   PRIMARY KEY (root_id, trace_id)
 ) WITH (ttl='%s')`, sourceTableName, ttl)
 }
@@ -130,6 +131,8 @@ func createSinkTableSQL() string {
   duration_sketch   BINARY,
   trace_count       BIGINT,
   error_count_total BIGINT,
+  span_count_total  BIGINT,
+  span_bytes_total  BIGINT,
   PRIMARY KEY (root_id)
 )`, sinkTableName)
 }
@@ -145,12 +148,13 @@ SELECT
   uddsketch_state(128, 0.01, service_hop_depth) AS depth_sketch,
   uddsketch_state(128, 0.01, root_duration_ns)  AS duration_sketch,
   count(*)                                      AS trace_count,
-  sum(error_count)                              AS error_count_total
+  sum(error_count)                              AS error_count_total,
+  sum(span_count)                               AS span_count_total,
+  sum(span_bytes_total)                         AS span_bytes_total
 FROM %s
 GROUP BY time_window, root_id`, flowName, sinkTableName, sourceTableName)
 }
 
-//nolint:ireturn // Intentional interface seam for DB mocking in unit tests.
 func (m *Manager) connect(ctx context.Context) (sqlConn, error) {
 	dsn, err := buildPostgresDSN(m.cfg)
 	if err != nil {
@@ -190,12 +194,10 @@ type sqlDB struct {
 	*sql.DB
 }
 
-//nolint:ireturn,rowserrcheck // Intentional interface seam for DB mocking in unit tests.
 func (db sqlDB) QueryContext(ctx context.Context, query string, args ...any) (rowSet, error) {
-	return db.DB.QueryContext(ctx, query, args...)
+	return db.DB.QueryContext(ctx, query, args...) //nolint:rowserrcheck // caller checks rows.Err via rowSet.Err.
 }
 
-//nolint:ireturn // Intentional interface seam for DB mocking in unit tests.
 func openPostgresDB(dsn string) (sqlConn, error) {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
