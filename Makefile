@@ -81,7 +81,7 @@ docker-push: tidy docker-login
 	docker buildx build --platform $(BUILD_PLATFORMS) -t $(DOCKER_IMAGE) . --push
 
 docker-build-local: tidy
-	docker build -t $(DOCKER_IMAGE) .
+	docker build --no-cache -t $(DOCKER_IMAGE) .
 
 kind-load: docker-build-local
 	kind load docker-image $(DOCKER_IMAGE) --name $(KIND_CLUSTER_NAME)

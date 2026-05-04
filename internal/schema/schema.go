@@ -129,6 +129,7 @@ func createSinkTableSQL() string {
   depth_sketch      BINARY,
   duration_sketch   BINARY,
   trace_count       BIGINT,
+  span_count        BIGINT,
   error_count_total BIGINT,
   PRIMARY KEY (root_id)
 )`, sinkTableName)
@@ -145,6 +146,7 @@ SELECT
   uddsketch_state(128, 0.01, service_hop_depth) AS depth_sketch,
   uddsketch_state(128, 0.01, root_duration_ns)  AS duration_sketch,
   count(*)                                      AS trace_count,
+  sum(span_count)                               AS span_count_total,
   sum(error_count)                              AS error_count_total
 FROM %s
 GROUP BY time_window, root_id`, flowName, sinkTableName, sourceTableName)
