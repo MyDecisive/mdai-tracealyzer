@@ -166,7 +166,7 @@ func TestBuildPostgresDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildPostgresDSN: %v", err)
 	}
-	want := "postgres://mdai:secret@127.0.0.1:4003/mdai?sslmode=disable"
+	want := "postgres://mdai:secret@127.0.0.1:4003/mdai?sslmode=disable" //nolint:gosec // test fixture, not a real credential.
 	if dsn != want {
 		t.Fatalf("dsn = %q, want %q", dsn, want)
 	}
