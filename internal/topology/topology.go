@@ -29,6 +29,7 @@ type Span struct {
 	StartTimeNs  int64
 	EndTimeNs    int64
 	StatusError  bool
+	SizeBytes    int64
 	OpAttrs      map[string]string
 }
 
@@ -86,6 +87,7 @@ type rootAccumulator struct {
 	serviceHopDepth int32
 	spanCount       int32
 	errorCount      int32
+	spanBytesTotal  int64
 	services        map[string]struct{}
 	operations      map[operationKey]struct{}
 }
@@ -147,6 +149,7 @@ func computeRoot(
 		SpanCount:       acc.spanCount,
 		ErrorCount:      acc.errorCount,
 		RootDurationNS:  root.EndTimeNs - root.StartTimeNs,
+		SpanBytesTotal:  acc.spanBytesTotal,
 	}
 }
 
@@ -155,6 +158,7 @@ func (a *rootAccumulator) recordSpan(span Span, depth int32, children [][8]byte)
 	if span.StatusError {
 		a.errorCount++
 	}
+	a.spanBytesTotal += span.SizeBytes
 	a.breadth = max(a.breadth, safeInt32(len(children)))
 	a.serviceHopDepth = max(a.serviceHopDepth, depth)
 	a.services[span.Service] = struct{}{}

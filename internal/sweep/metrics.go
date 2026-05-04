@@ -22,6 +22,7 @@ type Metrics struct {
 	drainErrors     prometheus.Counter
 	computeErrors   prometheus.Counter
 	orphanSpans     prometheus.Counter
+	orphanBytes     prometheus.Counter
 	computeDuration prometheus.Histogram
 }
 
@@ -57,11 +58,15 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		Name: "topology_orphan_spans_total",
 		Help: "Spans dropped at reconstruction because they were not reachable from any authentic root. Rising values indicate pathological truncation upstream.",
 	})
+	orphanBytes := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "topology_orphan_bytes_total",
+		Help: "Apportioned OTLP byte share of spans dropped at reconstruction. Datadog still bills for these bytes; surface them at the org level so per-root span_bytes_total under-counts are observable.",
+	})
 	computeDuration := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name: "topology_compute_duration_seconds",
 		Help: "Per-trace topology computation time, measured around a single Compute call.",
 	})
-	reg.MustRegister(sweeps, finalized, trigger, drain, compute, computeSkipped, orphan, computeDuration)
+	reg.MustRegister(sweeps, finalized, trigger, drain, compute, computeSkipped, orphan, orphanBytes, computeDuration)
 
 	return &Metrics{
 		sweeps:          sweeps,
@@ -71,6 +76,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		drainErrors:     drain,
 		computeErrors:   compute,
 		orphanSpans:     orphan,
+		orphanBytes:     orphanBytes,
 		computeDuration: computeDuration,
 	}
 }
@@ -116,6 +122,13 @@ func (m *Metrics) addOrphanSpans(n int32) {
 		return
 	}
 	m.orphanSpans.Add(float64(n))
+}
+
+func (m *Metrics) addOrphanBytes(n int64) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.orphanBytes.Add(float64(n))
 }
 
 func (m *Metrics) observeComputeDuration(d time.Duration) {

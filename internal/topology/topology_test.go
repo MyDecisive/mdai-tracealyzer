@@ -483,6 +483,48 @@ func TestCompute(t *testing.T) {
 	}
 }
 
+func TestComputeSumsSpanBytesTotalPerRoot(t *testing.T) {
+	t.Parallel()
+
+	spans := map[[8]byte]Span{
+		spanID(1): {
+			ParentSpanID: [8]byte{},
+			Service:      "checkout",
+			Name:         "root",
+			StartTimeNs:  100,
+			EndTimeNs:    500,
+			SizeBytes:    300,
+		},
+		spanID(2): {
+			ParentSpanID: spanID(1),
+			Service:      "checkout",
+			Name:         "child-a",
+			StartTimeNs:  120,
+			EndTimeNs:    180,
+			SizeBytes:    150,
+		},
+		spanID(3): {
+			ParentSpanID: spanID(1),
+			Service:      "checkout",
+			Name:         "child-b",
+			StartTimeNs:  200,
+			EndTimeNs:    400,
+			SizeBytes:    50,
+		},
+	}
+
+	rows, orphans := Compute(traceID(), spans)
+	if orphans != 0 {
+		t.Fatalf("orphans = %d, want 0", orphans)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row, got %d", len(rows))
+	}
+	if got, want := rows[0].SpanBytesTotal, int64(500); got != want {
+		t.Fatalf("SpanBytesTotal = %d, want %d", got, want)
+	}
+}
+
 func TestComputeOperationDerivation(t *testing.T) {
 	t.Parallel()
 

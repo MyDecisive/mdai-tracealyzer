@@ -213,6 +213,7 @@ func (s *Sweeper) process(ctx context.Context, f buffer.Finalizable) []topology.
 	rows, orphans, computeErr := s.computer.Compute(f.TraceID, f.Trigger, spans)
 	s.metrics.observeComputeDuration(time.Since(start))
 	s.metrics.addOrphanSpans(orphans)
+	s.metrics.addOrphanBytes(orphanBytes(spans, rows))
 
 	if errors.Is(computeErr, ErrNoRoot) {
 		s.metrics.incComputeSkipped(reasonNoRoot)
@@ -233,4 +234,19 @@ func (s *Sweeper) process(ctx context.Context, f buffer.Finalizable) []topology.
 		zap.Int("root_count", len(rows)),
 		zap.Int32("orphan_count", orphans))
 	return rows
+}
+
+func orphanBytes(spans map[string]buffer.SpanRecord, rows []topology.RootMetrics) int64 {
+	var total int64
+	for _, r := range spans {
+		total += r.SizeBytes
+	}
+	var attributed int64
+	for _, row := range rows {
+		attributed += row.SpanBytesTotal
+	}
+	if total <= attributed {
+		return 0
+	}
+	return total - attributed
 }

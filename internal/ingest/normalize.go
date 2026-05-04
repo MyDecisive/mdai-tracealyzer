@@ -8,6 +8,7 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -48,24 +49,56 @@ func Normalize(resourceSpans []*tracepb.ResourceSpans) ([]buffer.SpanRecord, int
 			continue
 		}
 		service := serviceNameFrom(rs.GetResource())
-		for _, ss := range rs.GetScopeSpans() {
-			if ss == nil {
+		spans, sizes := apportionedSpanSizes(rs)
+		for i, span := range spans {
+			record, ok := toRecord(span, service, sizes[i])
+			if !ok {
+				malformed++
 				continue
 			}
-			for _, span := range ss.GetSpans() {
-				if span == nil {
-					continue
-				}
-				record, ok := toRecord(span, service)
-				if !ok {
-					malformed++
-					continue
-				}
-				records = append(records, record)
-			}
+			records = append(records, record)
 		}
 	}
 	return records, malformed
+}
+
+func apportionedSpanSizes(rs *tracepb.ResourceSpans) ([]*tracepb.Span, []int64) {
+	var (
+		spans   []*tracepb.Span
+		sizes   []int64
+		spanSum int64
+	)
+	for _, ss := range rs.GetScopeSpans() {
+		if ss == nil {
+			continue
+		}
+		for _, span := range ss.GetSpans() {
+			if span == nil {
+				continue
+			}
+			size := int64(proto.Size(span))
+			spans = append(spans, span)
+			sizes = append(sizes, size)
+			spanSum += size
+		}
+	}
+	if len(spans) == 0 {
+		return nil, nil
+	}
+
+	overhead := int64(proto.Size(rs)) - spanSum
+	if overhead < 0 {
+		overhead = 0
+	}
+	n := int64(len(spans))
+	base, rem := overhead/n, overhead%n
+	for i := range sizes {
+		sizes[i] += base
+		if int64(i) < rem {
+			sizes[i]++
+		}
+	}
+	return spans, sizes
 }
 
 func estimateSpanCount(resourceSpans []*tracepb.ResourceSpans) int {
@@ -78,7 +111,7 @@ func estimateSpanCount(resourceSpans []*tracepb.ResourceSpans) int {
 	return total
 }
 
-func toRecord(span *tracepb.Span, service string) (buffer.SpanRecord, bool) {
+func toRecord(span *tracepb.Span, service string, sizeBytes int64) (buffer.SpanRecord, bool) {
 	traceID, ok := toTraceID(span.GetTraceId())
 	if !ok {
 		return buffer.SpanRecord{}, false
@@ -114,6 +147,7 @@ func toRecord(span *tracepb.Span, service string) (buffer.SpanRecord, bool) {
 		StartTimeNs:  startNs,
 		EndTimeNs:    endNs,
 		StatusError:  span.GetStatus().GetCode() == tracepb.Status_STATUS_CODE_ERROR,
+		SizeBytes:    sizeBytes,
 		OpAttrs:      opAttrs,
 	}, true
 }

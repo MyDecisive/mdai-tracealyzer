@@ -8,6 +8,7 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -328,6 +329,59 @@ func TestNormalize_NilEntriesIgnored(t *testing.T) {
 	records, _ := ingest.Normalize(req)
 	if len(records) != 1 {
 		t.Fatalf("want 1 record, got %d", len(records))
+	}
+}
+
+func TestNormalize_SizeBytesIncludesApportionedOverhead(t *testing.T) {
+	t.Parallel()
+
+	span := rootSpan(traceIDAllBytes, rootSpanID, "POST /api/orders", tracepb.Span_SPAN_KIND_SERVER, tracepb.Status_STATUS_CODE_OK,
+		strAttr("http.request.method", "POST"),
+		strAttr("http.route", "/api/orders"),
+	)
+	req := []*tracepb.ResourceSpans{resourceSpans("svc", []*tracepb.Span{span})}
+	want := int64(proto.Size(req[0]))
+
+	records, _ := ingest.Normalize(req)
+	if len(records) != 1 {
+		t.Fatalf("want 1 record, got %d", len(records))
+	}
+	if records[0].SizeBytes != want {
+		t.Errorf("SizeBytes = %d, want %d (proto.Size(ResourceSpans) for single-span group)", records[0].SizeBytes, want)
+	}
+	if records[0].SizeBytes <= int64(proto.Size(span)) {
+		t.Fatalf("SizeBytes (%d) should exceed bare proto.Size(span) (%d); fixture has no resource overhead", records[0].SizeBytes, proto.Size(span))
+	}
+}
+
+func TestNormalize_SizeBytesSumsToResourceSpansSize(t *testing.T) {
+	t.Parallel()
+
+	spans := []*tracepb.Span{
+		rootSpan(traceIDAllBytes, rootSpanID, "POST /api/orders", tracepb.Span_SPAN_KIND_SERVER, tracepb.Status_STATUS_CODE_OK,
+			strAttr("http.request.method", "POST"),
+			strAttr("http.route", "/api/orders"),
+		),
+		childSpan(traceIDAllBytes, childSpanID, rootSpanID, "SELECT", tracepb.Span_SPAN_KIND_CLIENT, tracepb.Status_STATUS_CODE_OK),
+		childSpan(traceIDAllBytes, childSpanID2, rootSpanID, "INSERT", tracepb.Span_SPAN_KIND_CLIENT, tracepb.Status_STATUS_CODE_OK),
+	}
+	req := []*tracepb.ResourceSpans{resourceSpans("checkout", spans)}
+	want := int64(proto.Size(req[0]))
+
+	records, malformed := ingest.Normalize(req)
+	if malformed != 0 {
+		t.Fatalf("malformed = %d, want 0", malformed)
+	}
+	if len(records) != len(spans) {
+		t.Fatalf("len(records) = %d, want %d", len(records), len(spans))
+	}
+
+	var sum int64
+	for _, r := range records {
+		sum += r.SizeBytes
+	}
+	if sum != want {
+		t.Errorf("sum(SizeBytes) = %d, want %d (proto.Size(ResourceSpans))", sum, want)
 	}
 }
 

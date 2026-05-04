@@ -119,6 +119,7 @@ func buildTable(batch writeBatch) (*table.Table, error) {
 			r.SpanCount,
 			r.ErrorCount,
 			r.RootDurationNS,
+			r.SpanBytesTotal,
 			r.Timestamp,
 		); err != nil {
 			return nil, fmt.Errorf("add row for trace_id %q: %w", r.TraceID, err)
@@ -151,6 +152,7 @@ func fieldColumns() []columnDef {
 		{name: "span_count", typ: types.INT32},
 		{name: "error_count", typ: types.INT32},
 		{name: "root_duration_ns", typ: types.INT64},
+		{name: "span_bytes_total", typ: types.INT64},
 	}
 }
 

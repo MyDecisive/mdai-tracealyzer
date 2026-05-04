@@ -14,4 +14,5 @@ type RootMetrics struct {
 	SpanCount       int32
 	ErrorCount      int32
 	RootDurationNS  int64
+	SpanBytesTotal  int64
 }

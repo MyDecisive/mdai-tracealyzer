@@ -30,6 +30,7 @@ type SpanRecord struct {
 	StartTimeNs  int64    `json:"start_time_ns"`
 	EndTimeNs    int64    `json:"end_time_ns"`
 	StatusError  bool     `json:"status_error"`
+	SizeBytes    int64    `json:"size_bytes"`
 	// OpAttrs is populated only for root spans (empty ParentSpanID); child
 	// spans leave it nil to save buffer memory.
 	OpAttrs map[string]string `json:"op_attrs,omitempty"`
