@@ -24,6 +24,7 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 				StartTimeNs:  1700000000000000000,
 				EndTimeNs:    1700000000250000000,
 				StatusError:  true,
+				SizeBytes:    1234,
 				OpAttrs: map[string]string{
 					"http.request.method": "POST",
 					"http.route":          "/cart",
@@ -41,6 +42,7 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 				Kind:         3,
 				StartTimeNs:  1,
 				EndTimeNs:    2,
+				SizeBytes:    87,
 			},
 		},
 	}

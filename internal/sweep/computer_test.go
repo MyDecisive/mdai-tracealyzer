@@ -129,6 +129,51 @@ func TestTopologyComputer_NoRoot_ReturnsErrNoRootAndOrphans(t *testing.T) {
 	}
 }
 
+func TestTopologyComputer_PropagatesSizeBytesFromRecord(t *testing.T) {
+	t.Parallel()
+
+	var traceID [16]byte
+	traceID[15] = 4
+	rootID := [8]byte{1}
+	childID := [8]byte{2}
+	records := map[string]buffer.SpanRecord{
+		"0100000000000000": {
+			TraceID:     traceID,
+			SpanID:      rootID,
+			Service:     "checkout",
+			Name:        "POST /checkout",
+			StartTimeNs: 100,
+			EndTimeNs:   200,
+			SizeBytes:   600,
+			OpAttrs:     map[string]string{"http.request.method": "POST", "http.route": "/checkout"},
+		},
+		"0200000000000000": {
+			TraceID:      traceID,
+			SpanID:       childID,
+			ParentSpanID: rootID,
+			Service:      "checkout",
+			Name:         "db.query",
+			StartTimeNs:  110,
+			EndTimeNs:    190,
+			SizeBytes:    150,
+		},
+	}
+
+	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, buffer.TriggerQuiet, records)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	if orphans != 0 {
+		t.Fatalf("orphans: want 0, got %d", orphans)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows: want 1, got %d", len(rows))
+	}
+	if got, want := rows[0].SpanBytesTotal, int64(750); got != want {
+		t.Fatalf("SpanBytesTotal: want %d (600+150 from SpanRecord.SizeBytes), got %d", want, got)
+	}
+}
+
 func TestTopologyComputer_EmptyInput_IsNotErrNoRoot(t *testing.T) {
 	t.Parallel()
 

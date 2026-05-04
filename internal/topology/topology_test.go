@@ -525,6 +525,57 @@ func TestComputeSumsSpanBytesTotalPerRoot(t *testing.T) {
 	}
 }
 
+func TestComputeMultiRoot_SpanBytesTotalIsPerRoot(t *testing.T) {
+	t.Parallel()
+
+	// Two authentic roots in the same trace, each with its own subtree.
+	// SpanBytesTotal must sum within a root's subtree only.
+	spans := map[[8]byte]Span{
+		spanID(1): {
+			ParentSpanID: [8]byte{},
+			Service:      "svc-a",
+			Name:         "root-a",
+			SizeBytes:    100,
+		},
+		spanID(2): {
+			ParentSpanID: spanID(1),
+			Service:      "svc-a",
+			Name:         "child-a",
+			SizeBytes:    25,
+		},
+		spanID(3): {
+			ParentSpanID: [8]byte{},
+			Service:      "svc-b",
+			Name:         "root-b",
+			SizeBytes:    400,
+		},
+		spanID(4): {
+			ParentSpanID: spanID(3),
+			Service:      "svc-b",
+			Name:         "child-b",
+			SizeBytes:    75,
+		},
+	}
+
+	rows, orphans := Compute(traceID(), spans)
+	if orphans != 0 {
+		t.Fatalf("orphans = %d, want 0", orphans)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	got := map[string]int64{}
+	for _, r := range rows {
+		got[r.RootService] = r.SpanBytesTotal
+	}
+	if got["svc-a"] != 125 {
+		t.Errorf("SpanBytesTotal{svc-a} = %d, want 125", got["svc-a"])
+	}
+	if got["svc-b"] != 475 {
+		t.Errorf("SpanBytesTotal{svc-b} = %d, want 475", got["svc-b"])
+	}
+}
+
 func TestComputeOperationDerivation(t *testing.T) {
 	t.Parallel()
 

@@ -60,7 +60,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	})
 	orphanBytes := prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "topology_orphan_bytes_total",
-		Help: "Apportioned OTLP byte share of spans dropped at reconstruction. Datadog still bills for these bytes; surface them at the org level so per-root span_bytes_total under-counts are observable.",
+		Help: "Apportioned OTLP byte share of spans dropped at reconstruction. Surfaces under-counts in per-root span_bytes_total at the org level.",
 	})
 	computeDuration := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name: "topology_compute_duration_seconds",
