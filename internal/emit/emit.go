@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	// ErrClosed is returned when Emit is called after Close.
+	// ErrClosed is returned when Emit is called after Stop.
 	ErrClosed = errors.New("emitter closed")
 	// ErrQueueFull is returned when rows cannot be accepted because the queue is full.
 	ErrQueueFull = errors.New("emitter queue full")
@@ -24,14 +24,9 @@ var (
 
 const loggedTraceIDLimit = 10
 
-// Emitter accepts finalized topology rows for eventual emission to GreptimeDB.
-type Emitter interface {
-	Emit(ctx context.Context, rows []topology.RootMetrics) error
-	Close(ctx context.Context) error
-}
-
 type writer interface {
 	Write(ctx context.Context, batch writeBatch) error
+	HealthCheck(ctx context.Context) error
 	Close() error
 }
 
@@ -59,29 +54,22 @@ type metrics struct {
 	emissionsFailed prometheus.Counter
 }
 
-type emitter struct {
+// Emitter accepts finalized topology rows and ships them to GreptimeDB
+// asynchronously. It is a run.Component: Start runs the flush loop, Stop
+// drains pending rows and closes the underlying writer.
+type Emitter struct {
 	cfg     config.Emitter
 	logger  *zap.Logger
 	metrics metrics
 	writer  writer
 	now     func() time.Time
 
-	mu     sync.Mutex
-	closed bool
-
-	queue  chan []topology.RootMetrics
-	stopCh chan context.Context
-	doneCh chan struct{}
-	wg     sync.WaitGroup
-
-	errMu   sync.Mutex
-	lastErr error
+	queue   chan []topology.RootMetrics
+	pending []topology.RootMetrics
+	closed  atomic.Bool
 }
 
-// New constructs the production emitter using the GreptimeDB SDK client.
-//
-//nolint:ireturn // Returning the Emitter interface keeps callers decoupled from the concrete async implementation.
-func New(cfg config.Emitter, logger *zap.Logger, reg prometheus.Registerer) (Emitter, error) {
+func New(cfg config.Emitter, logger *zap.Logger, reg prometheus.Registerer) (*Emitter, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -105,7 +93,7 @@ func newWithWriter(
 	m metrics,
 	w writer,
 	now func() time.Time,
-) *emitter {
+) *Emitter {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -113,39 +101,85 @@ func newWithWriter(
 		now = time.Now
 	}
 
-	e := &emitter{
+	return &Emitter{
 		cfg:     cfg,
 		logger:  logger,
 		metrics: m,
 		writer:  w,
 		now:     now,
 		queue:   make(chan []topology.RootMetrics, cfg.QueueCapacity),
-		stopCh:  make(chan context.Context, 1),
-		doneCh:  make(chan struct{}),
 	}
-
-	e.wg.Add(1)
-	go e.run()
-
-	return e
 }
 
-func (e *emitter) Emit(_ context.Context, rows []topology.RootMetrics) error {
-	if len(rows) == 0 {
+func (*Emitter) Name() string { return "emitter" }
+
+func (e *Emitter) HealthCheck(ctx context.Context) error {
+	return e.writer.HealthCheck(ctx)
+}
+
+// Start runs the flush loop until ctx cancels. Writes use a detached
+// context.Background() parent so a SIGTERM does not abort an in-flight
+// flush mid-call; Stop performs the final drain under the supervisor's
+// shutdown deadline.
+//
+//nolint:contextcheck // see doc — writes use Background to survive parent cancel.
+func (e *Emitter) Start(ctx context.Context) error {
+	ticker := time.NewTicker(e.cfg.FlushInterval.Duration())
+	defer ticker.Stop()
+
+	writeCtx := context.Background()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case rows := <-e.queue:
+			e.pending = append(e.pending, rows...)
+			if err := e.flushReady(writeCtx, &e.pending); err != nil {
+				e.logger.Error("flush emitter batch", zap.Error(err))
+			}
+		case <-ticker.C:
+			if err := e.flushAll(writeCtx, &e.pending); err != nil {
+				e.logger.Error("flush emitter batch", zap.Error(err))
+			}
+		}
+	}
+}
+
+// Stop is idempotent.
+func (e *Emitter) Stop(ctx context.Context) error {
+	if !e.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 
-	// TODO: remove cloning if we can be sure that:
-	//  After calling Emit(ctx, rows), the caller transfers ownership of the slice contents to the emitter until the emitter has processed them. The caller must not mutate the slice elements or reuse the slice backing
-	//  array.
-	cloned := cloneRows(rows)
+	e.pending = e.drainQueue(e.pending)
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	var errs []error
+	if err := e.flushAll(ctx, &e.pending); err != nil {
+		errs = append(errs, fmt.Errorf("flush during shutdown: %w", err))
+	}
+	if err := e.writer.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("close writer: %w", err))
+	}
+	return errors.Join(errs...)
+}
 
-	if e.closed {
+// Emit enqueues rows non-blockingly. Returns ErrClosed after Stop and
+// ErrQueueFull when the queue is at capacity.
+func (e *Emitter) Emit(_ context.Context, rows []topology.RootMetrics) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	if e.closed.Load() {
 		return ErrClosed
 	}
+
+	// TODO: remove cloning if we can be sure that:
+	//  After calling Emit(ctx, rows), the caller transfers ownership of the
+	//  slice contents to the emitter until the emitter has processed them.
+	//  The caller must not mutate the slice elements or reuse the slice
+	//  backing array.
+	cloned := cloneRows(rows)
 
 	select {
 	case e.queue <- cloned:
@@ -156,68 +190,7 @@ func (e *emitter) Emit(_ context.Context, rows []topology.RootMetrics) error {
 	}
 }
 
-func (e *emitter) Close(ctx context.Context) error {
-	e.mu.Lock()
-	if e.closed {
-		e.mu.Unlock()
-		select {
-		case <-e.doneCh:
-			return e.closeErr()
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	e.closed = true
-	e.mu.Unlock()
-
-	e.stopCh <- ctx
-
-	select {
-	case <-e.doneCh:
-		return e.closeErr()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (e *emitter) run() {
-	defer e.wg.Done()
-	defer close(e.doneCh)
-
-	ticker := time.NewTicker(e.cfg.FlushInterval.Duration())
-	defer ticker.Stop()
-
-	pending := make([]topology.RootMetrics, 0, e.cfg.BatchSize)
-
-	for {
-		select {
-		case rows := <-e.queue:
-			pending = append(pending, rows...)
-			if err := e.flushReady(context.Background(), &pending); err != nil {
-				e.setErr(err)
-				e.logger.Error("flush emitter batch", zap.Error(err))
-			}
-		case <-ticker.C:
-			if err := e.flushAll(context.Background(), &pending); err != nil {
-				e.setErr(err)
-				e.logger.Error("flush emitter batch", zap.Error(err))
-			}
-		case shutdownCtx := <-e.stopCh:
-			pending = e.drainQueue(pending)
-			if err := e.flushAll(shutdownCtx, &pending); err != nil {
-				e.setErr(err)
-				e.logger.Error("flush emitter batch during shutdown", zap.Error(err))
-			}
-			if err := e.writer.Close(); err != nil {
-				e.setErr(err)
-				e.logger.Error("close emitter writer", zap.Error(err))
-			}
-			return
-		}
-	}
-}
-
-func (e *emitter) drainQueue(pending []topology.RootMetrics) []topology.RootMetrics {
+func (e *Emitter) drainQueue(pending []topology.RootMetrics) []topology.RootMetrics {
 	for {
 		select {
 		case rows := <-e.queue:
@@ -228,7 +201,7 @@ func (e *emitter) drainQueue(pending []topology.RootMetrics) []topology.RootMetr
 	}
 }
 
-func (e *emitter) flushReady(parent context.Context, pending *[]topology.RootMetrics) error {
+func (e *Emitter) flushReady(parent context.Context, pending *[]topology.RootMetrics) error {
 	var firstErr error
 	for len(*pending) >= e.cfg.BatchSize {
 		chunk := cloneRows((*pending)[:e.cfg.BatchSize])
@@ -240,7 +213,7 @@ func (e *emitter) flushReady(parent context.Context, pending *[]topology.RootMet
 	return firstErr
 }
 
-func (e *emitter) flushAll(parent context.Context, pending *[]topology.RootMetrics) error {
+func (e *Emitter) flushAll(parent context.Context, pending *[]topology.RootMetrics) error {
 	if len(*pending) == 0 {
 		return nil
 	}
@@ -257,7 +230,7 @@ func (e *emitter) flushAll(parent context.Context, pending *[]topology.RootMetri
 	return firstErr
 }
 
-func (e *emitter) writeWithRetry(parent context.Context, batch []topology.RootMetrics) error {
+func (e *Emitter) writeWithRetry(parent context.Context, batch []topology.RootMetrics) error {
 	if len(batch) == 0 {
 		return nil
 	}
@@ -299,7 +272,7 @@ func (e *emitter) writeWithRetry(parent context.Context, batch []topology.RootMe
 	return err
 }
 
-func (e *emitter) recordDroppedRows(reason string, rows []topology.RootMetrics, err error) {
+func (e *Emitter) recordDroppedRows(reason string, rows []topology.RootMetrics, err error) {
 	e.metrics.emissionsFailed.Add(float64(len(rows)))
 	fields := []zap.Field{
 		zap.String("reason", reason),
@@ -356,7 +329,6 @@ func newMetrics(reg prometheus.Registerer) (metrics, error) {
 		Name: "topology_emissions_failed_total",
 		Help: "Number of topology rows dropped before a successful GreptimeDB write.",
 	})
-	// TODO: this nil check not needed?
 	if reg == nil {
 		reg = prometheus.NewRegistry()
 	}
@@ -372,21 +344,4 @@ func newMetrics(reg prometheus.Registerer) (metrics, error) {
 		counter = existing
 	}
 	return metrics{emissionsFailed: counter}, nil
-}
-
-func (e *emitter) setErr(err error) {
-	if err == nil {
-		return
-	}
-	e.errMu.Lock()
-	defer e.errMu.Unlock()
-	if e.lastErr == nil {
-		e.lastErr = err
-	}
-}
-
-func (e *emitter) closeErr() error {
-	e.errMu.Lock()
-	defer e.errMu.Unlock()
-	return e.lastErr
 }

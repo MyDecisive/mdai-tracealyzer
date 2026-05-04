@@ -117,6 +117,60 @@ func TestReadiness_Pending_NilWhenZeroGates(t *testing.T) {
 	}
 }
 
+func TestReadiness_WaitChanClosesWhenAllGatesMark(t *testing.T) {
+	t.Parallel()
+
+	r := app.NewReadiness("a", "b")
+	ch := r.WaitChan()
+	select {
+	case <-ch:
+		t.Fatal("WaitChan should be open before all gates are marked")
+	default:
+	}
+	r.Mark("a")
+	select {
+	case <-ch:
+		t.Fatal("WaitChan should be open with one gate outstanding")
+	default:
+	}
+	r.Mark("b")
+	select {
+	case <-ch:
+	default:
+		t.Fatal("WaitChan should be closed once every gate is marked")
+	}
+}
+
+func TestReadiness_WaitChanClosedImmediatelyWithZeroGates(t *testing.T) {
+	t.Parallel()
+
+	r := app.NewReadiness()
+	select {
+	case <-r.WaitChan():
+	default:
+		t.Fatal("WaitChan should be closed when there are no gates")
+	}
+}
+
+func TestReadiness_MarkShuttingDownLatchesReadyFalse(t *testing.T) {
+	t.Parallel()
+
+	r := app.NewReadiness("a")
+	r.Mark("a")
+	if !r.Ready() {
+		t.Fatal("expected ready after mark")
+	}
+	r.MarkShuttingDown()
+	if r.Ready() {
+		t.Fatal("MarkShuttingDown must flip Ready to false")
+	}
+	// Subsequent marks must not flip Ready back to true.
+	r.Mark("a")
+	if r.Ready() {
+		t.Fatal("Ready must stay false after MarkShuttingDown even on further marks")
+	}
+}
+
 func TestReadiness_ConcurrentMarks(t *testing.T) {
 	t.Parallel()
 
