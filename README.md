@@ -2,15 +2,15 @@
 
 Trace topology service — computes structural metrics from OTLP traces and writes them to GreptimeDB for tail-sampling decisions.
 
-## What it does
+## Overview
 
-The v1 target: ingest OTLP spans (gRPC on `4317`, HTTP on `4318`), buffer them per trace in Valkey, and — once a trace is quiet for long enough or hits its max TTL — compute topology metrics (breadth, service-hop depth, service/operation/span/error counts, root duration, attributed OTLP span bytes) and write one row per root to the `trace_root_topology` table in GreptimeDB. A continuous Greptime FLOW (`trace_root_topology_1m_flow`) pre-aggregates those rows into `trace_root_topology_1m`, which holds 1-minute UDDSketches for breadth, service-hop depth, and root duration alongside `trace_count`, `error_count_total`, `span_count_total`, and `span_bytes_total`, keyed by `root_id` within each 1-minute `time_window`. Dashboards consume the raw rows and the 1-minute sketches to surface traces worth keeping for tail-sampling decisions; `span_bytes_total` is the proxy for Datadog APM ingestion bytes per root.
+Tracealyzer ingests OTLP spans (gRPC on `4317`, HTTP on `4318`), buffers them per trace in Valkey, and — once a trace is quiet for long enough or reaches its max TTL — computes topology metrics (breadth, service-hop depth, service/operation/span/error counts, root duration, attributed OTLP span bytes) and writes one row per root to the `trace_root_topology` table in GreptimeDB. A continuous Greptime FLOW (`trace_root_topology_1m_flow`) pre-aggregates those rows into `trace_root_topology_1m`, which holds 1-minute UDDSketches for breadth, service-hop depth, and root duration alongside `trace_count`, `error_count_total`, `span_count_total`, and `span_bytes_total`, keyed by `root_id` within each 1-minute `time_window`. Dashboards consume the raw rows and the 1-minute sketches to surface traces worth keeping for tail-sampling decisions; `span_bytes_total` is the proxy for Datadog APM ingestion bytes per root.
 
-The service does not make the sampling decision itself, store full trace data, render the dashboard, or alert. Span-link handling and genuinely multi-root traces are deferred past v1.
+The service does not make the sampling decision itself, store full trace data, render the dashboard, or alert. Span-link handling and multi-root traces are deferred past v1.
 
 ## Running the test-stand demo
 
-The `test-stand/` tree exercises the upstream side — a Datadog agent plus a handful of demo microservices that emit realistic traces. The flow is: demo services → Datadog agent → OTel collector gateway (kind) → tracealyzer (kind).
+The `test-stand/` tree exercises the upstream side — a Datadog agent plus several demo microservices that emit realistic traces. The flow is: demo services → Datadog agent → OTel collector gateway (kind) → tracealyzer (kind).
 
 Every demo container (catalog, checkout, gateway, payments, inventory-http, inventory-grpc, notifier) is one role of a single `demo-svc` binary; compose runs it seven times with distinct `DEMO_ROLE` and `DD_SERVICE` env vars. Adding a new role means a new `cmd/demo-svc/role_<name>.go` plus a compose entry — no new module to wire.
 
@@ -65,14 +65,14 @@ make demo-emit DEMO_SCENARIO=browse
 | `deep` | gateway → checkout → inventory-http → catalog — pushes `service_hop_depth` to 4 |
 | `checkout-async-joined` | Checkout publishes to Kafka (trace context is always injected into headers); notifier consumes asynchronously, extracts the context, and joins the same trace — exercises messaging-derived operations on a non-root span and tests quiet-period accumulation across late-arriving spans. |
 | `checkout-async-detached` | Same producer behavior as `joined` — headers carry trace context. The detached flag instructs the notifier consumer to **skip extraction**, so its span becomes a new root with a `messaging.operation.type=process` operation — exercises messaging-derived operations on a root span. |
-| `catalog-db` | Gateway → catalog (HTTP) → Postgres `SELECT items` (CLIENT span with `db.system=postgresql`) — exercises operation derivation on non-HTTP/non-gRPC/non-messaging CLIENT spans (the §4.2 fallback path). |
+| `catalog-db` | Gateway → catalog (HTTP) → Postgres `SELECT items` (CLIENT span with `db.system=postgresql`) — exercises operation derivation on non-HTTP/non-gRPC/non-messaging CLIENT spans (the `span.Name()` fallback). |
 | `browse-cached` | Gateway hits Redis directly with `GET catalog:items` before falling through to catalog — same `db.system` fallback path on a different system; cache miss adds `redis.set` and an HTTP catalog hop, hit emits a single `redis.get` CLIENT span. |
 
 Start with `browse` to confirm basic span ingestion, then use `checkout-rollback-grpc`, `checkout-grpc-error`, `wide`, `deep`, and `checkout-async-detached` to stress different topology dimensions.
 
 ### Continuous load
 
-A `load-generator` service is included in the compose stack behind a `load` profile so it stays off by default. It hits `gateway-api` on a configurable interval with a weighted-random scenario mix.
+A `load-generator` service is included in the compose stack behind a `load` profile so it stays off by default. It sends requests to `gateway-api` on a configurable interval with a weighted-random scenario mix.
 
 ```sh
 make demo-load-up      # start
@@ -80,7 +80,7 @@ make demo-load-logs    # tail
 make demo-load-down    # stop and remove
 ```
 
-Tunables (env on the service in `test-stand/docker-compose.yaml`): `INTERVAL` (Go duration, default `1s`), `CONCURRENCY` (default `1`), `MIX` (`name:weight` pairs, comma-separated), `DURATION` (`0` = forever, otherwise a Go duration for bounded soak runs), `START_DELAY`, `GATEWAY_URL`. The default mix covers all fourteen scenarios with `wide` and `deep` doubled.
+Configuration (env on the service in `test-stand/docker-compose.yaml`): `INTERVAL` (Go duration, default `1s`), `CONCURRENCY` (default `1`), `MIX` (`name:weight` pairs, comma-separated), `DURATION` (`0` = forever, otherwise a Go duration for bounded soak runs), `START_DELAY`, `GATEWAY_URL`. The default mix covers all fourteen scenarios with `wide` and `deep` doubled.
 
 ### Messaging
 
@@ -90,7 +90,7 @@ The producer and consumer wrappers in `internal/common/kafka.go` set `messaging.
 
 ### Database and cache
 
-The default stack also includes a Postgres 16 instance (seeded from `test-stand/postgres/init.sql` with an `items` table) and a Redis 7 cache. The wrappers in `internal/common/db.go` and `internal/common/cache.go` annotate each query with `db.system`, `db.statement`, and `db.operation`, and emit `span.kind=client` with a generic span name (`postgres.query`, `redis.get`, `redis.set`). Operation derivation falls through to `span.Name()` for these spans, exercising the §4.2 fallback that no HTTP, gRPC, or messaging scenario reaches.
+The default stack also includes a Postgres 16 instance (seeded from `test-stand/postgres/init.sql` with an `items` table) and a Redis 7 cache. The wrappers in `internal/common/db.go` and `internal/common/cache.go` annotate each query with `db.system`, `db.statement`, and `db.operation`, and emit `span.kind=client` with a generic span name (`postgres.query`, `redis.get`, `redis.set`). Operation derivation falls through to `span.Name()` for these spans, exercising the fallback path that no HTTP, gRPC, or messaging scenario reaches.
 
 Catalog connects via `POSTGRES_DSN` and serves Postgres-backed responses on `?source=db`. Gateway connects via `REDIS_ADDR` and uses the cache on `?cache=true`. Both env vars are wired in compose; service startup is gated on the Postgres and Redis healthchecks so the demo apps don't crash-loop while the dependencies come up.
 
