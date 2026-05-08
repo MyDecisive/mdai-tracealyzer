@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/run"
@@ -33,14 +34,17 @@ const (
 // HTTPServer serves OTLP/HTTP at POST /v1/traces. Only
 // application/x-protobuf is accepted; application/json is deferred past v1.
 //
-// HTTPServer implements run.Component when constructed with a non-empty
-// addr (Start binds and serves). Pre-bound listeners use Serve directly.
+// Start binds addr and spawns the serve goroutine; tests with pre-bound
+// listeners use Serve directly.
 type HTTPServer struct {
 	server *http.Server
 	addr   string
 	logger *zap.Logger
 
+	started   bool
 	serveDone chan struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewHTTPServer builds the server without starting it. addr is consumed
@@ -68,10 +72,7 @@ func NewHTTPServer(rec Recorder, addr string, metrics *Metrics, logger *zap.Logg
 
 func (*HTTPServer) Name() string { return "otlp_http" }
 
-// Start binds addr and runs Serve until ctx cancels. It returns nil when
-// ctx cancels; Stop must be called separately to halt the underlying HTTP
-// server.
-func (s *HTTPServer) Start(ctx context.Context) error {
+func (s *HTTPServer) Start(ctx context.Context, host run.Host) error {
 	if s.addr == "" {
 		return errors.New("HTTPServer.Start: addr is empty")
 	}
@@ -80,11 +81,20 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.addr, err)
 	}
-	return s.serveListener(ctx, ln)
+	s.serveDone = make(chan struct{})
+	s.started = true
+	go func() {
+		defer close(s.serveDone)
+		err := s.server.Serve(ln)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			host.Fatal("otlp_http", err)
+		}
+	}()
+	return nil
 }
 
-// Serve runs the server on a pre-bound listener. The serve loop ends when
-// Shutdown is called; ctx is not consulted.
+// Serve runs the server on a pre-bound listener. Returns when the server is
+// stopped via Shutdown.
 func (s *HTTPServer) Serve(ln net.Listener) error {
 	err := s.server.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
@@ -93,36 +103,14 @@ func (s *HTTPServer) Serve(ln net.Listener) error {
 	return err
 }
 
-func (s *HTTPServer) Stop(ctx context.Context) error { return s.Shutdown(ctx) }
-
-// Shutdown gracefully stops the server. If Start was used, it also waits
-// for the inner Serve goroutine to exit.
 func (s *HTTPServer) Shutdown(ctx context.Context) error {
-	err := s.server.Shutdown(ctx)
-	if s.serveDone != nil {
-		<-s.serveDone
-	}
-	return err
-}
-
-func (s *HTTPServer) serveListener(ctx context.Context, ln net.Listener) error {
-	s.serveDone = make(chan struct{})
-	serveErr := make(chan error, 1)
-	go func() {
-		defer close(s.serveDone)
-		err := s.server.Serve(ln)
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
+	s.closeOnce.Do(func() {
+		s.closeErr = s.server.Shutdown(ctx)
+		if s.started {
+			<-s.serveDone
 		}
-		serveErr <- err
-	}()
-
-	select {
-	case err := <-serveErr:
-		return err
-	case <-ctx.Done():
-		return nil
-	}
+	})
+	return s.closeErr
 }
 
 func readDecodedBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
@@ -184,8 +172,18 @@ func (h *httpTraceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rejected, firstErr := record(r.Context(), h.recorder, h.metrics, h.logger, req.GetResourceSpans())
-	out, marshalErr := proto.Marshal(buildExportResponse(rejected, firstErr, h.logger))
+	records, malformed := Normalize(req.GetResourceSpans())
+	h.metrics.incSpansReceived(len(records) + malformed)
+	h.metrics.incSpansMalformed(malformed)
+	rejected, firstErr := record(r.Context(), h.recorder, h.logger, records)
+	if isTransient(firstErr) {
+		h.logger.Warn("ingest: transient backpressure",
+			zap.Int("rejected", rejected),
+			zap.Error(firstErr))
+		http.Error(w, classifyForClient(firstErr), http.StatusServiceUnavailable)
+		return
+	}
+	out, marshalErr := proto.Marshal(buildExportResponse(rejected, malformed, firstErr, h.logger))
 	if marshalErr != nil {
 		h.logger.Error("encode trace response", zap.Error(marshalErr))
 		http.Error(w, "encode response", http.StatusInternalServerError)

@@ -25,7 +25,9 @@ type greptimeWriter struct {
 
 //nolint:ireturn // The writer interface is the package's test seam around the GreptimeDB SDK.
 func newGreptimeWriter(cfg config.Emitter, _ *zap.Logger) (writer, error) {
-	client, err := newGreptimeClient(cfg)
+	client, err := newGreptimeClient(cfg, func(clientCfg *greptime.Config) (sdkClient, error) {
+		return greptime.NewClient(clientCfg)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -33,14 +35,7 @@ func newGreptimeWriter(cfg config.Emitter, _ *zap.Logger) (writer, error) {
 }
 
 //nolint:ireturn // The GreptimeDB client is consumed through the sdkClient test seam.
-func newGreptimeClient(cfg config.Emitter) (sdkClient, error) {
-	return newGreptimeClientWithFactory(cfg, func(clientCfg *greptime.Config) (sdkClient, error) {
-		return greptime.NewClient(clientCfg)
-	})
-}
-
-//nolint:ireturn // The GreptimeDB client is consumed through the sdkClient test seam.
-func newGreptimeClientWithFactory(
+func newGreptimeClient(
 	cfg config.Emitter,
 	factory func(*greptime.Config) (sdkClient, error),
 ) (sdkClient, error) {

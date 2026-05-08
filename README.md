@@ -131,6 +131,7 @@ The `topology_` metrics exposed are:
 - `topology_compute_skipped_total{reason="no_root"}` — traces skipped for a known reason during compute.
 - `topology_orphan_spans_total` — spans unreachable from any root.
 - `topology_orphan_bytes_total` — apportioned OTLP byte share of orphan spans; surfaces under-counts in per-root `span_bytes_total` at the org level.
+- `topology_root_id_collisions_total` — rows merged away by the GreptimeDB source-table primary key `(root_id, trace_id)` because two or more authentic roots in one trace shared a `RootID`. The sweep WARN log carries `trace_id` and the merged-row count; the colliding `service::operation` is recoverable by querying the source table for that `trace_id`.
 - `topology_compute_duration_seconds` (histogram) — per-trace compute latency.
 
 **Emit:**

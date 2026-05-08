@@ -87,11 +87,11 @@ func TestNewGreptimeClientReturnsFactoryClient(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeSDKClient{}
-	got, err := newGreptimeClientWithFactory(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
+	got, err := newGreptimeClient(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
 		return client, nil
 	})
 	if err != nil {
-		t.Fatalf("newGreptimeClientWithFactory: %v", err)
+		t.Fatalf("newGreptimeClient: %v", err)
 	}
 	if got != client {
 		t.Fatal("expected returned client to be the factory client")

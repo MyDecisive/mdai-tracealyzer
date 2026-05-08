@@ -6,24 +6,17 @@ import (
 	"go.uber.org/zap"
 )
 
-// Probe runs a readiness check until it succeeds or ctx is cancelled. It
-// is a fire-and-exit Component: once the underlying dependency reports
-// healthy, Probe.Start invokes onReady and returns nil. The supervisor
-// keeps the process up for the remaining components.
-//
-// Probe never gives up on its own — Kubernetes startup-probe budget is the
-// authoritative "give up and restart the pod" signal. Treat ctx
-// cancellation as a graceful supervisor shutdown, not a probe failure, so
-// Start returns nil rather than propagating the wrapped ctx error.
 type Probe struct {
 	name    string
 	check   func(context.Context) error
 	onReady func()
 	backoff Backoff
 	logger  *zap.Logger
+
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
-// NewProbe accepts a nil onReady.
 func NewProbe(name string, check func(context.Context) error, onReady func(), b Backoff, logger *zap.Logger) *Probe {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -39,20 +32,41 @@ func NewProbe(name string, check func(context.Context) error, onReady func(), b 
 
 func (p *Probe) Name() string { return "probe:" + p.name }
 
-func (p *Probe) Start(ctx context.Context) error {
-	err := Retry(ctx, p.name, p.check, p.backoff, p.logger)
-	if err == nil {
-		if p.onReady != nil {
-			p.onReady()
+// Start spawns the retry goroutine on a Background-rooted ctx so SIGTERM
+// does not abort the loop; Shutdown drives cancellation explicitly.
+//
+//nolint:contextcheck,unparam // error return is required by Component interface.
+func (p *Probe) Start(_ context.Context, host Host) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+	p.done = make(chan struct{})
+	go func() {
+		defer close(p.done)
+		err := Retry(ctx, p.name, p.check, p.backoff, p.logger)
+		if err == nil {
+			if p.onReady != nil {
+				p.onReady()
+			}
+			p.logger.Info("probe ready", zap.String("name", p.name))
+			return
 		}
-		p.logger.Info("probe ready", zap.String("name", p.name))
-		return nil
-	}
-	if ctx.Err() != nil {
-		return nil //nolint:nilerr // ctx cancel is supervisor shutdown, not probe failure.
-	}
-	return err
+		if ctx.Err() != nil {
+			return
+		}
+		host.Fatal("probe:"+p.name, err)
+	}()
+	return nil
 }
 
-// Stop is a no-op: Start exits on ctx cancellation or success.
-func (*Probe) Stop(_ context.Context) error { return nil }
+func (p *Probe) Shutdown(ctx context.Context) error {
+	if p.cancel == nil {
+		return nil
+	}
+	p.cancel()
+	select {
+	case <-p.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}

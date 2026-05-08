@@ -22,7 +22,6 @@ type fakeBuffer struct {
 	scanErr    error
 	drainSpans map[[16]byte]map[string]buffer.SpanRecord
 	drainErrs  map[[16]byte]error
-	onScan     func()
 
 	mu          sync.Mutex
 	scanCalls   int
@@ -42,11 +41,7 @@ func (f *fakeBuffer) Scan(ctx context.Context, quietCutoff, ttlCutoff time.Time)
 	f.mu.Lock()
 	f.scanCalls++
 	f.scanCutoffs = append(f.scanCutoffs, scanArgs{quietCutoff, ttlCutoff})
-	onScan := f.onScan
 	f.mu.Unlock()
-	if onScan != nil {
-		onScan()
-	}
 	if f.scanErr != nil {
 		return nil, f.scanErr
 	}
@@ -77,7 +72,7 @@ type computeResult struct {
 	err     error
 }
 
-func (c *fakeComputer) Compute(id [16]byte, _ string, _ map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
+func (c *fakeComputer) Compute(id [16]byte, _ map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
 	c.calls.Add(1)
 	r := c.results[id]
 	return r.rows, r.orphans, r.err
@@ -121,13 +116,17 @@ func newSweeperForTest(t *testing.T, buf Buffer, c Computer, e Emitter) (*Sweepe
 		MaxTTL:         5 * time.Minute,
 		Interval:       10 * time.Millisecond,
 		WorkerPoolSize: 4,
-	}, m, zap.NewNop())
+	}, nil, m, zap.NewNop())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
 	return s, m
 }
+
+type noopHost struct{}
+
+func (noopHost) Fatal(string, error) {}
 
 func traceID(b byte) [16]byte {
 	var id [16]byte
@@ -492,7 +491,7 @@ func TestSweeper_FanoutRunsConcurrently(t *testing.T) {
 		MaxTTL:         5 * time.Minute,
 		Interval:       10 * time.Millisecond,
 		WorkerPoolSize: pool,
-	}, m, zap.NewNop())
+	}, nil, m, zap.NewNop())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -531,7 +530,7 @@ type gatingComputer struct {
 	target  int32
 }
 
-func (g *gatingComputer) Compute(_ [16]byte, _ string, _ map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
+func (g *gatingComputer) Compute(_ [16]byte, _ map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
 	if g.arrived.Add(1) > g.target {
 		return nil, 0, errors.New("more arrivals than pool size")
 	}
@@ -565,51 +564,7 @@ func TestSweeper_Tick_CancelBeforeScan_IsBenignSkip(t *testing.T) {
 	}
 }
 
-// TestSweeper_Tick_CancelAfterScan_CompletesDrainEmit: once Scan returns
-// finalizables, Drain's delete must still reach Emit even if parent cancels.
-func TestSweeper_Tick_CancelAfterScan_CompletesDrainEmit(t *testing.T) {
-	t.Parallel()
-
-	a := traceID(1)
-	ctx, cancel := context.WithCancel(context.Background())
-	buf := &fakeBuffer{
-		scanResult: []buffer.Finalizable{{TraceID: a, Trigger: buffer.TriggerQuiet}},
-		drainSpans: map[[16]byte]map[string]buffer.SpanRecord{
-			a: {"span-a": {TraceID: a}},
-		},
-		onScan: cancel,
-	}
-	comp := &fakeComputer{
-		results: map[[16]byte]computeResult{
-			a: {rows: []topology.RootMetrics{{TraceID: "a"}}},
-		},
-	}
-	em := &fakeEmitter{}
-	s, m := newSweeperForTest(t, buf, comp, em)
-
-	s.tick(ctx)
-
-	if buf.scanCalls != 1 {
-		t.Fatalf("Scan calls: want 1, got %d", buf.scanCalls)
-	}
-	if len(buf.drainCalls) != 1 {
-		t.Fatalf("Drain calls: want 1, got %d", len(buf.drainCalls))
-	}
-	if em.callCount() != 1 {
-		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
-	}
-	if got := testutil.ToFloat64(m.finalized); got != 1 {
-		t.Fatalf("finalized: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 1 {
-		t.Fatalf("sweeps{ok}: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.drainErrors); got != 0 {
-		t.Fatalf("drain_errors: want 0, got %v", got)
-	}
-}
-
-func TestSweeper_Run_ReturnsOnCtxCancel(t *testing.T) {
+func TestSweeper_StartIsNonBlockingShutdownHalts(t *testing.T) {
 	t.Parallel()
 
 	buf := &fakeBuffer{}
@@ -617,20 +572,223 @@ func TestSweeper_Run_ReturnsOnCtxCancel(t *testing.T) {
 	em := &fakeEmitter{}
 	s, _ := newSweeperForTest(t, buf, comp, em)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- s.Start(ctx) }()
+	if err := s.Start(t.Context(), noopHost{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
 
-	cancel()
+func TestSweeper_DoesNotDrainBeforeReadinessGate(t *testing.T) {
+	t.Parallel()
+
+	a := traceID(1)
+	buf := &fakeBuffer{
+		scanResult: []buffer.Finalizable{{TraceID: a, Trigger: buffer.TriggerQuiet}},
+		drainSpans: map[[16]byte]map[string]buffer.SpanRecord{
+			a: {"span-a": {TraceID: a}},
+		},
+	}
+	comp := &fakeComputer{}
+	em := &fakeEmitter{}
+
+	gate := make(chan struct{})
+	reg := prometheus.NewRegistry()
+	s, err := New(buf, comp, em, Config{
+		QuietPeriod:    30 * time.Second,
+		MaxTTL:         5 * time.Minute,
+		Interval:       time.Millisecond,
+		WorkerPoolSize: 1,
+	}, gate, NewMetrics(reg), zap.NewNop())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+
+	if err := s.Start(t.Context(), noopHost{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if got := buf.scanCalls; got != 0 {
+		t.Errorf("Scan must not run before gate fires: got %d calls", got)
+	}
+	if got := len(buf.drainCalls); got != 0 {
+		t.Errorf("Drain must not run before gate fires: got %d calls", got)
+	}
+}
+
+// TestSweeper_ClaimedTraceCompletesAcrossShutdown: a worker that has begun
+// Drain runs to completion before Shutdown returns; the resulting row reaches
+// Emit. Per ADR §5.3.
+func TestSweeper_ClaimedTraceCompletesAcrossShutdown(t *testing.T) {
+	t.Parallel()
+
+	a := traceID(1)
+	drainEntered := make(chan struct{})
+	releaseDrain := make(chan struct{})
+	buf := &blockingBuffer{
+		traceID:      a,
+		drainEntered: drainEntered,
+		releaseDrain: releaseDrain,
+	}
+	comp := &fakeComputer{
+		results: map[[16]byte]computeResult{
+			a: {rows: []topology.RootMetrics{{TraceID: "a"}}},
+		},
+	}
+	em := &fakeEmitter{}
+
+	gate := make(chan struct{})
+	close(gate)
+	reg := prometheus.NewRegistry()
+	s, err := New(buf, comp, em, Config{
+		QuietPeriod:    30 * time.Second,
+		MaxTTL:         5 * time.Minute,
+		Interval:       time.Millisecond,
+		WorkerPoolSize: 1,
+	}, gate, NewMetrics(reg), zap.NewNop())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+
+	if err := s.Start(t.Context(), noopHost{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 
 	select {
-	case err := <-done:
+	case <-drainEntered:
+	case <-time.After(time.Second):
+		t.Fatal("Drain never entered")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- s.Shutdown(context.Background()) }()
+
+	// Shutdown must wait on the in-flight Drain.
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned while Drain was still in flight: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseDrain)
+
+	select {
+	case err := <-shutdownDone:
 		if err != nil {
-			t.Fatalf("Start: want nil, got %v", err)
+			t.Fatalf("Shutdown: %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Start did not return after cancel")
+		t.Fatal("Shutdown did not return after Drain released")
 	}
+
+	if got := em.callCount(); got != 1 {
+		t.Fatalf("Emit calls: want 1 (the claimed trace's row), got %d", got)
+	}
+}
+
+// TestSweeper_UnclaimedTracesLeftInValkeyAcrossShutdown: when stopCh
+// closes, claim returns false on the post-stop tail. Workers finish
+// whatever they have already claimed; the rest stays in Valkey for the
+// next pod's sweep. Per ADR §5.3.
+func TestSweeper_UnclaimedTracesLeftInValkeyAcrossShutdown(t *testing.T) {
+	t.Parallel()
+
+	a := traceID(1)
+	drainEntered := make(chan struct{})
+	releaseDrain := make(chan struct{})
+	buf := &blockingBuffer{
+		traceID:      a,
+		extra:        []buffer.Finalizable{{TraceID: traceID(2), Trigger: buffer.TriggerQuiet}, {TraceID: traceID(3), Trigger: buffer.TriggerQuiet}},
+		drainEntered: drainEntered,
+		releaseDrain: releaseDrain,
+	}
+	comp := &fakeComputer{
+		results: map[[16]byte]computeResult{
+			a: {rows: []topology.RootMetrics{{TraceID: "a"}}},
+		},
+	}
+	em := &fakeEmitter{}
+
+	gate := make(chan struct{})
+	close(gate)
+	reg := prometheus.NewRegistry()
+	s, err := New(buf, comp, em, Config{
+		QuietPeriod:    30 * time.Second,
+		MaxTTL:         5 * time.Minute,
+		Interval:       time.Millisecond,
+		WorkerPoolSize: 1,
+	}, gate, NewMetrics(reg), zap.NewNop())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+
+	if err := s.Start(t.Context(), noopHost{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	select {
+	case <-drainEntered:
+	case <-time.After(time.Second):
+		t.Fatal("Drain never entered")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- s.Shutdown(context.Background()) }()
+
+	// Give the dispatcher time to observe stopCh and exit.
+	time.Sleep(20 * time.Millisecond)
+	close(releaseDrain)
+
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not return")
+	}
+
+	if got := len(buf.drainCalls); got != 1 {
+		t.Errorf("only the claimed trace must be drained: got %d Drain calls", got)
+	}
+}
+
+// blockingBuffer holds Drain mid-call so tests can observe shutdown
+// behavior with a Drain in flight. The first finalizable returned has
+// traceID; extra appears after it (used to verify post-stop traces stay
+// undispatched).
+type blockingBuffer struct {
+	traceID [16]byte
+	extra   []buffer.Finalizable
+
+	drainEntered chan struct{}
+	releaseDrain chan struct{}
+	enterOnce    sync.Once
+
+	mu         sync.Mutex
+	drainCalls [][16]byte
+}
+
+func (b *blockingBuffer) Scan(_ context.Context, _, _ time.Time) ([]buffer.Finalizable, error) {
+	out := []buffer.Finalizable{{TraceID: b.traceID, Trigger: buffer.TriggerQuiet}}
+	out = append(out, b.extra...)
+	return out, nil
+}
+
+func (b *blockingBuffer) Drain(_ context.Context, id [16]byte) (map[string]buffer.SpanRecord, error) {
+	b.mu.Lock()
+	b.drainCalls = append(b.drainCalls, id)
+	b.mu.Unlock()
+	b.enterOnce.Do(func() { close(b.drainEntered) })
+	<-b.releaseDrain
+	return map[string]buffer.SpanRecord{"span": {TraceID: id}}, nil
 }
 
 func TestNewMetrics_NilRegisterer(t *testing.T) {
@@ -822,9 +980,67 @@ func TestNew_ValidatesInputs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			m := NewMetrics(prometheus.NewRegistry())
-			if _, err := New(tc.buf, tc.c, tc.e, tc.cfg, m, tc.log); err == nil {
+			if _, err := New(tc.buf, tc.c, tc.e, tc.cfg, nil, m, tc.log); err == nil {
 				t.Fatal("want error, got nil")
 			}
 		})
+	}
+}
+
+func TestSweeper_RootIDCollision_CountsMergedRows(t *testing.T) {
+	t.Parallel()
+
+	a := traceID(1)
+	buf := &fakeBuffer{
+		scanResult: []buffer.Finalizable{{TraceID: a, Trigger: buffer.TriggerQuiet}},
+		drainSpans: map[[16]byte]map[string]buffer.SpanRecord{
+			a: {"span-a": {TraceID: a}},
+		},
+	}
+	comp := &fakeComputer{
+		results: map[[16]byte]computeResult{
+			a: {rows: []topology.RootMetrics{
+				{TraceID: "a", RootID: "svc::POST /orders"},
+				{TraceID: "a", RootID: "svc::POST /orders"},
+				{TraceID: "a", RootID: "svc::POST /orders"},
+				{TraceID: "a", RootID: "svc::GET /health"},
+			}},
+		},
+	}
+	em := &fakeEmitter{}
+	s, m := newSweeperForTest(t, buf, comp, em)
+
+	s.tick(context.Background())
+
+	if got := testutil.ToFloat64(m.rootIDCollisions); got != 2 {
+		t.Fatalf("root_id_collisions_total: want 2 (4 rows, 2 distinct RootIDs), got %v", got)
+	}
+}
+
+func TestSweeper_NoRootIDCollision_LeavesCounterZero(t *testing.T) {
+	t.Parallel()
+
+	a := traceID(1)
+	buf := &fakeBuffer{
+		scanResult: []buffer.Finalizable{{TraceID: a, Trigger: buffer.TriggerQuiet}},
+		drainSpans: map[[16]byte]map[string]buffer.SpanRecord{
+			a: {"span-a": {TraceID: a}},
+		},
+	}
+	comp := &fakeComputer{
+		results: map[[16]byte]computeResult{
+			a: {rows: []topology.RootMetrics{
+				{TraceID: "a", RootID: "svc::a"},
+				{TraceID: "a", RootID: "svc::b"},
+			}},
+		},
+	}
+	em := &fakeEmitter{}
+	s, m := newSweeperForTest(t, buf, comp, em)
+
+	s.tick(context.Background())
+
+	if got := testutil.ToFloat64(m.rootIDCollisions); got != 0 {
+		t.Fatalf("root_id_collisions_total: want 0, got %v", got)
 	}
 }

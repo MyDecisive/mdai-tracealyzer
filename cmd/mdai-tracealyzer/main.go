@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -122,7 +123,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		MaxTTL:         cfg.Buffer.MaxTTL.Duration(),
 		Interval:       cfg.Buffer.SweepInterval.Duration(),
 		WorkerPoolSize: cfg.Buffer.SweepWorkerPoolSize,
-	}, sweepMetrics, logger)
+	}, ready.WaitChan(), sweepMetrics, logger)
 	if err != nil {
 		return fmt.Errorf("sweeper: %w", err)
 	}
@@ -162,17 +163,11 @@ func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		zap.Strings("readiness_pending", ready.Pending()),
 	)
 
-	// Admin sits first so it stays serving health/metrics until everything
-	// else has drained. Emitter precedes the ingest servers and sweeper so
-	// the reverse Stop order is sweeper → ingest → emitter, which matches
-	// the data flow into emitter's queue.
-	// The sweeper performs destructive reads from Valkey (Drain deletes the
-	// trace's hash before the row reaches the emitter), so it must wait for
-	// every downstream sink to confirm reachability — otherwise a restart
-	// could Drain pre-existing finalizable traces and immediately drop them
-	// when the schema or write endpoint is not yet healthy.
-	gatedSweeper := run.NewGated(sweeper, ready.WaitChan())
-
+	// Registration order encodes dependency order: consumers/sinks first,
+	// producers last. Reverse Shutdown therefore drains the data path
+	// downstream-first (sweeper → ingest → emitter). The sweeper's gate on
+	// ready.WaitChan() guards destructive Drain until the schema and emitter
+	// probes have both reported healthy.
 	sup := run.New(cfg.Service.ShutdownGrace.Duration(), logger,
 		admin,
 		schemaProbe,
@@ -180,7 +175,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		emitterProbe,
 		grpcServer,
 		httpServer,
-		gatedSweeper,
+		sweeper,
 	)
 	sup.OnShutdown(ready.MarkShuttingDown)
 	return sup.Run(ctx)
@@ -192,39 +187,39 @@ type adminComponent struct {
 	server   *http.Server
 	listener net.Listener
 
+	started   bool
 	serveDone chan struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 var _ run.Component = (*adminComponent)(nil)
 
 func (*adminComponent) Name() string { return "admin" }
 
-func (a *adminComponent) Start(ctx context.Context) error {
+func (a *adminComponent) Start(_ context.Context, host run.Host) error {
 	a.serveDone = make(chan struct{})
-	serveErr := make(chan error, 1)
+	a.started = true
 	go func() {
 		defer close(a.serveDone)
 		err := a.server.Serve(a.listener)
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			host.Fatal("admin", err)
 		}
-		serveErr <- err
 	}()
-
-	select {
-	case err := <-serveErr:
-		return err
-	case <-ctx.Done():
-		return nil
-	}
+	return nil
 }
 
-func (a *adminComponent) Stop(ctx context.Context) error {
-	err := a.server.Shutdown(ctx)
-	if a.serveDone != nil {
+func (a *adminComponent) Shutdown(ctx context.Context) error {
+	a.closeOnce.Do(func() {
+		if !a.started {
+			a.closeErr = a.listener.Close()
+			return
+		}
+		a.closeErr = a.server.Shutdown(ctx)
 		<-a.serveDone
-	}
-	return err
+	})
+	return a.closeErr
 }
 
 func buildAdminMux(registry *prometheus.Registry, ready *app.Readiness) *http.ServeMux {

@@ -287,8 +287,6 @@ func TestHTTPServer_ReportsClassifiedErrorMessage(t *testing.T) {
 		wantMsg string
 	}{
 		{"invalid_span", buffer.ErrInvalidSpan, buffer.ErrInvalidSpan.Error()},
-		{"buffer_full", buffer.ErrBufferFull, buffer.ErrBufferFull.Error()},
-		{"backend_unavailable", buffer.ErrBackendUnavailable, buffer.ErrBackendUnavailable.Error()},
 		{"unclassified_fallback", errors.New("some driver-internal thing"), "buffer rejected spans"},
 	}
 	for _, tc := range cases {
@@ -354,35 +352,20 @@ func TestHTTPServer_CountsMalformedSpansAsReceived(t *testing.T) {
 	}
 }
 
-func TestHTTPServer_StartReturnsOnCtxCancelStopHalts(t *testing.T) {
+func TestHTTPServer_StartIsNonBlockingShutdownHalts(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
 	server := ingest.NewHTTPServer(rec, "127.0.0.1:0", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 
-	ctx, cancel := context.WithCancel(t.Context())
-	startErr := make(chan error, 1)
-	go func() { startErr <- server.Start(ctx) }()
-
-	// Give Start a moment to bind. We don't need a stronger signal because
-	// the test only asserts Start returns on cancel; bind failure would
-	// fail the test below regardless.
-	time.Sleep(50 * time.Millisecond)
-
-	cancel()
-	select {
-	case err := <-startErr:
-		if err != nil {
-			t.Fatalf("Start: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Start did not return on ctx cancel")
+	if err := server.Start(t.Context(), noopHost{}); err != nil {
+		t.Fatalf("Start: %v", err)
 	}
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stopCancel()
-	if err := server.Stop(stopCtx); err != nil {
-		t.Fatalf("Stop: %v", err)
+	if err := server.Shutdown(stopCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 }
 
