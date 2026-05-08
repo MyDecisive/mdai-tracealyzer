@@ -34,12 +34,13 @@ func (r *recorder) snapshot() []string {
 }
 
 type fakeComponent struct {
-	name        string
-	rec         *recorder
-	startErr    error
-	shutdownErr error
-	onStart     func(run.Host)
-	onShutdown  func()
+	name            string
+	rec             *recorder
+	startErr        error
+	shutdownErr     error
+	onStart         func(run.Host)
+	onShutdown      func()
+	captureShutdown func(context.Context)
 
 	startCount    atomic.Int32
 	shutdownCount atomic.Int32
@@ -59,9 +60,12 @@ func (f *fakeComponent) Start(_ context.Context, host run.Host) error {
 	return nil
 }
 
-func (f *fakeComponent) Shutdown(_ context.Context) error {
+func (f *fakeComponent) Shutdown(ctx context.Context) error {
 	f.shutdownCount.Add(1)
 	f.rec.record("shutdown_enter:" + f.name)
+	if f.captureShutdown != nil {
+		f.captureShutdown(ctx)
+	}
 	if f.onShutdown != nil {
 		f.onShutdown()
 	}
@@ -218,10 +222,8 @@ func TestSupervisor_HostFatalAfterShutdownStartedIsSafe(t *testing.T) {
 			savedHost = host
 			go host.Fatal("fataler", firstFatal)
 		},
-		// onShutdown runs after the supervisor has begun the shutdown
-		// phase. A Fatal here must not retrigger shutdown and must not
-		// deadlock; it may be appended to the joined error or dropped on
-		// overflow per ADR §4.5.
+		// onShutdown runs mid-shutdown; this Fatal must not retrigger
+		// shutdown and must not deadlock.
 		onShutdown: func() { savedHost.Fatal("fataler", duringShutdownFatal) },
 	}
 	sup := run.New(time.Second, zap.NewNop(), fataler)
@@ -338,14 +340,14 @@ func TestSupervisor_PreShutdownHookRunsOnceBeforeAnyShutdown(t *testing.T) {
 	}
 
 	events := rec.snapshot()
-	preStops := 0
+	preShutdowns := 0
 	for _, e := range events {
 		if e == "preShutdown" {
-			preStops++
+			preShutdowns++
 		}
 	}
-	if preStops != 1 {
-		t.Errorf("preShutdown hook ran %d times, want 1", preStops)
+	if preShutdowns != 1 {
+		t.Errorf("preShutdown hook ran %d times, want 1", preShutdowns)
 	}
 	preIdx := slices.Index(events, "preShutdown")
 	firstShutdown := -1
@@ -360,6 +362,86 @@ func TestSupervisor_PreShutdownHookRunsOnceBeforeAnyShutdown(t *testing.T) {
 	}
 	if preIdx >= firstShutdown {
 		t.Fatalf("preShutdown must precede any Shutdown: preIdx=%d firstShutdown=%d", preIdx, firstShutdown)
+	}
+}
+
+func TestSupervisor_ShutdownReceivesUncanceledGraceCtx(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{}
+	var (
+		observed    bool
+		liveAtCall  bool
+		hasDeadline bool
+	)
+	a := &fakeComponent{
+		name: "a", rec: rec,
+		captureShutdown: func(ctx context.Context) {
+			observed = true
+			liveAtCall = ctx.Err() == nil
+			_, hasDeadline = ctx.Deadline()
+		},
+	}
+	sup := run.New(time.Second, zap.NewNop(), a)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- sup.Run(ctx) }()
+	waitForCondition(t, func() bool { return a.startCount.Load() == 1 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if !observed {
+		t.Fatal("Shutdown not observed")
+	}
+	if !liveAtCall {
+		t.Error("Shutdown ctx was canceled at call time; supervisor must derive a fresh grace ctx via WithoutCancel")
+	}
+	if !hasDeadline {
+		t.Error("Shutdown ctx has no deadline; supervisor must apply the grace timeout")
+	}
+}
+
+func TestSupervisor_CleanCtxCancelWithShutdownErrorReturnsOnlyShutdownError(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{}
+	shutdownErr := errors.New("a shutdown fail")
+	a := &fakeComponent{name: "a", rec: rec, shutdownErr: shutdownErr}
+	sup := run.New(time.Second, zap.NewNop(), a)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- sup.Run(ctx) }()
+	waitForCondition(t, func() bool { return a.startCount.Load() == 1 })
+	cancel()
+
+	err := <-done
+	if !errors.Is(err, shutdownErr) {
+		t.Fatalf("err must wrap shutdownErr: %v", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("err must not contain context.Canceled (clean cancel): %v", err)
+	}
+}
+
+func TestSupervisor_RunIsOneShot(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{}
+	a := &fakeComponent{name: "a", rec: rec}
+	sup := run.New(time.Second, zap.NewNop(), a)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- sup.Run(ctx) }()
+	waitForCondition(t, func() bool { return a.startCount.Load() == 1 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	if err := sup.Run(t.Context()); !errors.Is(err, run.ErrRunAlreadyCalled) {
+		t.Fatalf("second Run: want ErrRunAlreadyCalled, got %v", err)
 	}
 }
 

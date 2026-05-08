@@ -5,10 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
 )
+
+// ErrRunAlreadyCalled is returned by Supervisor.Run if it has already been
+// invoked. Run is one-shot: fatalCh and component state are not safe to
+// reuse across invocations.
+var ErrRunAlreadyCalled = errors.New("supervisor: Run already called")
 
 type fatalSignal struct {
 	component string
@@ -19,10 +25,11 @@ type Supervisor struct {
 	components []Component
 	grace      time.Duration
 	logger     *zap.Logger
-	preStop    func()
+	onShutdown func()
 	fatalCh    chan fatalSignal
 	overflowMu sync.Mutex
 	overflow   []error
+	runStarted atomic.Bool
 }
 
 func New(grace time.Duration, logger *zap.Logger, components ...Component) *Supervisor {
@@ -34,13 +41,13 @@ func New(grace time.Duration, logger *zap.Logger, components ...Component) *Supe
 		components: components,
 		grace:      grace,
 		logger:     logger,
-		preStop:    func() {},
+		onShutdown: func() {},
 		fatalCh:    make(chan fatalSignal, bufSize),
 	}
 }
 
 func (s *Supervisor) OnShutdown(fn func()) {
-	s.preStop = fn
+	s.onShutdown = fn
 }
 
 func (s *Supervisor) Fatal(component string, err error) {
@@ -56,6 +63,10 @@ func (s *Supervisor) Fatal(component string, err error) {
 }
 
 func (s *Supervisor) Run(ctx context.Context) error {
+	if !s.runStarted.CompareAndSwap(false, true) {
+		return ErrRunAlreadyCalled
+	}
+
 	var triggerErr error
 
 	for _, c := range s.components {
@@ -83,11 +94,25 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		s.logger.Info("supervisor: shutdown trigger", zap.String("trigger", "start_error"))
 	}
 
-	s.preStop()
+	s.onShutdown()
 
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.grace)
 	defer cancel()
 
+	stopErrs := s.shutdownComponents(stopCtx)
+
+	if triggerErr == nil && len(stopErrs) == 0 {
+		return nil
+	}
+	parts := make([]error, 0, 1+len(stopErrs))
+	if triggerErr != nil {
+		parts = append(parts, triggerErr)
+	}
+	parts = append(parts, stopErrs...)
+	return errors.Join(parts...)
+}
+
+func (s *Supervisor) shutdownComponents(stopCtx context.Context) []error {
 	var stopErrs []error
 	for i := len(s.components) - 1; i >= 0; i-- {
 		c := s.components[i]
@@ -101,12 +126,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				zap.Duration("duration", dur),
 				zap.Error(err))
 			stopErrs = append(stopErrs, fmt.Errorf("shutdown %s: %w", c.Name(), err))
-		} else {
-			s.logger.Info("supervisor: shutdown complete",
-				zap.String("name", c.Name()), zap.Duration("duration", dur))
+			continue
 		}
+		s.logger.Info("supervisor: shutdown complete",
+			zap.String("name", c.Name()), zap.Duration("duration", dur))
 	}
-
 	for drained := false; !drained; {
 		select {
 		case f := <-s.fatalCh:
@@ -115,19 +139,9 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			drained = true
 		}
 	}
-
 	s.overflowMu.Lock()
 	stopErrs = append(stopErrs, s.overflow...)
 	s.overflow = nil
 	s.overflowMu.Unlock()
-
-	if triggerErr == nil && len(stopErrs) == 0 {
-		return nil
-	}
-	parts := make([]error, 0, 1+len(stopErrs))
-	if triggerErr != nil {
-		parts = append(parts, triggerErr)
-	}
-	parts = append(parts, stopErrs...)
-	return errors.Join(parts...)
+	return stopErrs
 }

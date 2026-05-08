@@ -111,11 +111,10 @@ func New(buf Buffer, c Computer, e Emitter, cfg Config, gate <-chan struct{}, m 
 
 func (*Sweeper) Name() string { return "sweeper" }
 
-// Start spawns the tick goroutine on context.Background so a Drain →
-// row-collection sequence is not interrupted by SIGTERM; Shutdown signals
-// via stopCh.
+// Start runs the tick body on Background so SIGTERM doesn't interrupt a
+// Drain → row-collection; Shutdown signals via stopCh.
 //
-//nolint:gosec,contextcheck // intentional Background-rooted goroutine.
+//nolint:gosec,contextcheck
 func (s *Sweeper) Start(_ context.Context, _ run.Host) error {
 	s.started = true
 	s.stopCh = make(chan struct{})
@@ -124,10 +123,6 @@ func (s *Sweeper) Start(_ context.Context, _ run.Host) error {
 	return nil
 }
 
-// Shutdown signals the tick loop and waits for it to exit. The wait is
-// bounded by one trace's worst-case Drain + Compute plus the final batch
-// Emit (a queue send) — independent of the supplied ctx. Shutdown is the
-// sweeper-side R2 exception (ADR §5.3).
 func (s *Sweeper) Shutdown(_ context.Context) error {
 	s.closeOnce.Do(func() {
 		if !s.started {
@@ -153,8 +148,7 @@ func (s *Sweeper) run() {
 	t := time.NewTicker(s.cfg.Interval)
 	defer t.Stop()
 	for {
-		// Prefer stopCh so a closed channel always wins against a
-		// ticker fire that may have been buffered during a long tick.
+		// Prefer stopCh against a buffered ticker fire from a long tick.
 		select {
 		case <-s.stopCh:
 			return
@@ -204,15 +198,10 @@ func (s *Sweeper) tick(ctx context.Context) {
 	s.metrics.incSweep(resultOK)
 }
 
-// fanout drives a bounded worker pool that pulls finalizable traces
-// through a mutex-guarded claim loop. Workers acquire the claim mutex,
-// non-blocking peek stopCh, and either claim the next trace + increment
-// the cursor or exit. A push-style `select { <-stopCh, jobs <- f }`
-// dispatcher cannot guarantee this: with both cases ready Go's select
-// picks at random, so a worker that becomes ready after stopCh closed
-// could still receive a post-shutdown trace. The pull loop bounds
-// post-shutdown claims to at most one per worker — the next claim sees
-// the closed stopCh and returns false.
+// fanout pulls finalizable traces through a mutex-guarded claim loop. A
+// push-style `select { <-stopCh, jobs <- f }` send can hand a worker a
+// post-stopCh trace because Go's select is random when both cases are
+// ready; the pull loop bounds post-shutdown claims to ≤1 per worker.
 func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) []topology.RootMetrics {
 	workers := min(s.cfg.WorkerPoolSize, len(finalizable))
 
@@ -223,6 +212,8 @@ func (s *Sweeper) fanout(ctx context.Context, finalizable []buffer.Finalizable) 
 	claim := func() (buffer.Finalizable, bool) {
 		claimMu.Lock()
 		defer claimMu.Unlock()
+		// stopCh peek MUST stay inside the mutex; moving it out breaks the
+		// post-stop ≤1-claim-per-worker bound.
 		select {
 		case <-s.stopCh:
 			return buffer.Finalizable{}, false

@@ -32,10 +32,9 @@ func NewProbe(name string, check func(context.Context) error, onReady func(), b 
 
 func (p *Probe) Name() string { return "probe:" + p.name }
 
-// Start spawns the retry goroutine on a Background-rooted ctx so SIGTERM
-// does not abort the loop; Shutdown drives cancellation explicitly.
+// Start roots the retry goroutine on Background so SIGTERM doesn't abort it.
 //
-//nolint:contextcheck,unparam // error return is required by Component interface.
+//nolint:contextcheck,unparam
 func (p *Probe) Start(_ context.Context, host Host) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel

@@ -39,12 +39,13 @@ func startEmitter(t *testing.T, e *Emitter) {
 }
 
 type fakeWriter struct {
-	mu       sync.Mutex
-	batches  []writeBatch
-	errs     []error
-	callCh   chan struct{}
-	closeErr error
-	closed   bool
+	mu         sync.Mutex
+	batches    []writeBatch
+	errs       []error
+	callCh     chan struct{}
+	closeErr   error
+	closed     bool
+	closeCount int
 }
 
 func (w *fakeWriter) Write(_ context.Context, batch writeBatch) error {
@@ -72,6 +73,7 @@ func (w *fakeWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.closed = true
+	w.closeCount++
 	return w.closeErr
 }
 
@@ -214,6 +216,34 @@ func TestEmitterReturnsErrQueueFullAndCountsDrops(t *testing.T) {
 	}
 	if logs.Len() == 0 {
 		t.Fatal("expected warning log for dropped rows")
+	}
+}
+
+func TestEmitter_ShutdownWithoutStartClosesWriter(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	m, err := newMetrics(reg)
+	if err != nil {
+		t.Fatalf("newMetrics: %v", err)
+	}
+
+	w := &fakeWriter{}
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, w, fixedNow())
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := e.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown without Start: %v", err)
+	}
+	if !w.closed {
+		t.Fatal("writer.Close not called when Shutdown is invoked without prior Start")
+	}
+	if err := e.Shutdown(ctx); err != nil {
+		t.Errorf("second Shutdown must be idempotent, got %v", err)
+	}
+	if got := w.closeCount; got != 1 {
+		t.Errorf("writer.Close called %d times; want 1", got)
 	}
 }
 

@@ -67,14 +67,14 @@ type Emitter struct {
 	writer  writer
 	now     func() time.Time
 
-	queue       chan []topology.RootMetrics
-	pending     []topology.RootMetrics
-	closedMu    sync.RWMutex
-	closed      bool
-	started     bool
-	stopCh      chan struct{}
-	doneCh      chan struct{}
-	abortWrites chan struct{}
+	queue        chan []topology.RootMetrics
+	pending      []topology.RootMetrics
+	closedMu     sync.RWMutex
+	closed       bool
+	started      bool
+	stopCh       chan struct{}
+	doneCh       chan struct{}
+	cancelWrites context.CancelFunc
 }
 
 func New(cfg config.Emitter, logger *zap.Logger, reg prometheus.Registerer) (*Emitter, error) {
@@ -110,15 +110,14 @@ func newWithWriter(
 	}
 
 	return &Emitter{
-		cfg:         cfg,
-		logger:      logger,
-		metrics:     m,
-		writer:      w,
-		now:         now,
-		queue:       make(chan []topology.RootMetrics, cfg.QueueCapacity),
-		stopCh:      make(chan struct{}),
-		doneCh:      make(chan struct{}),
-		abortWrites: make(chan struct{}),
+		cfg:     cfg,
+		logger:  logger,
+		metrics: m,
+		writer:  w,
+		now:     now,
+		queue:   make(chan []topology.RootMetrics, cfg.QueueCapacity),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
 	}
 }
 
@@ -128,24 +127,17 @@ func (e *Emitter) HealthCheck(ctx context.Context) error {
 	return e.writer.HealthCheck(ctx)
 }
 
-// Start spawns the flush goroutine on a Background-rooted writeCtx so SIGTERM
-// does not abort an in-flight flush; Shutdown cancels via abortWrites (R10).
+// Start roots writeCtx on Background so SIGTERM doesn't abort mid-flush;
+// Shutdown calls cancelWrites to abort an in-flight Write past the grace.
 //
 //nolint:contextcheck
 func (e *Emitter) Start(_ context.Context, _ run.Host) error {
-	e.closedMu.Lock()
-	e.started = true
-	e.closedMu.Unlock()
-
 	writeCtx, cancelWrites := context.WithCancel(context.Background())
 
-	go func() {
-		select {
-		case <-e.abortWrites:
-			cancelWrites()
-		case <-writeCtx.Done():
-		}
-	}()
+	e.closedMu.Lock()
+	e.started = true
+	e.cancelWrites = cancelWrites
+	e.closedMu.Unlock()
 
 	go e.run(writeCtx, cancelWrites)
 	return nil
@@ -173,7 +165,7 @@ func (e *Emitter) Shutdown(ctx context.Context) error {
 	select {
 	case <-e.doneCh:
 	case <-ctx.Done():
-		close(e.abortWrites)
+		e.cancelWrites()
 		<-e.doneCh
 	}
 

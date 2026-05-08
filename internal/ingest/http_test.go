@@ -352,7 +352,7 @@ func TestHTTPServer_CountsMalformedSpansAsReceived(t *testing.T) {
 	}
 }
 
-func TestHTTPServer_StartIsNonBlockingShutdownHalts(t *testing.T) {
+func TestHTTPServer_StartServesAndShutdownHalts(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
@@ -362,10 +362,42 @@ func TestHTTPServer_StartIsNonBlockingShutdownHalts(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
+	addr := server.Addr()
+	if addr == nil {
+		t.Fatal("Addr() returned nil after Start")
+	}
+	url := "http://" + addr.String() + "/v1/traces"
+
+	body, err := proto.Marshal(&coltracepb.ExportTraceServiceRequest{})
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	post := func(ctx context.Context) (*http.Response, error) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-protobuf")
+		return http.DefaultClient.Do(req)
+	}
+
+	resp, err := post(t.Context())
+	if err != nil {
+		t.Fatalf("POST before Shutdown: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST before Shutdown: status %d, want 200", resp.StatusCode)
+	}
+
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stopCancel()
 	if err := server.Shutdown(stopCtx); err != nil {
 		t.Fatalf("Shutdown: %v", err)
+	}
+
+	postCtx, postCancel := context.WithTimeout(context.Background(), time.Second)
+	defer postCancel()
+	if resp, err := post(postCtx); err == nil {
+		_ = resp.Body.Close()
+		t.Error("POST succeeded after Shutdown; expected connection failure")
 	}
 }
 

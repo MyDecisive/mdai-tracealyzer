@@ -42,6 +42,7 @@ type HTTPServer struct {
 	logger *zap.Logger
 
 	started   bool
+	listener  net.Listener
 	serveDone chan struct{}
 	closeOnce sync.Once
 	closeErr  error
@@ -81,6 +82,7 @@ func (s *HTTPServer) Start(ctx context.Context, host run.Host) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.addr, err)
 	}
+	s.listener = ln
 	s.serveDone = make(chan struct{})
 	s.started = true
 	go func() {
@@ -93,8 +95,18 @@ func (s *HTTPServer) Start(ctx context.Context, host run.Host) error {
 	return nil
 }
 
-// Serve runs the server on a pre-bound listener. Returns when the server is
-// stopped via Shutdown.
+// Addr returns the bound listener address after Start, or nil if Start was
+// never called or failed.
+func (s *HTTPServer) Addr() net.Addr {
+	if s.listener == nil {
+		return nil
+	}
+	return s.listener.Addr()
+}
+
+// Serve is a test-only entry point that runs the HTTP server on a pre-bound
+// listener. It bypasses Start (no listener bind, no host escalation). Tests
+// must still call Shutdown to halt the server. Production callers use Start.
 func (s *HTTPServer) Serve(ln net.Listener) error {
 	err := s.server.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {

@@ -621,9 +621,6 @@ func TestSweeper_DoesNotDrainBeforeReadinessGate(t *testing.T) {
 	}
 }
 
-// TestSweeper_ClaimedTraceCompletesAcrossShutdown: a worker that has begun
-// Drain runs to completion before Shutdown returns; the resulting row reaches
-// Emit. Per ADR §5.3.
 func TestSweeper_ClaimedTraceCompletesAcrossShutdown(t *testing.T) {
 	t.Parallel()
 
@@ -692,10 +689,6 @@ func TestSweeper_ClaimedTraceCompletesAcrossShutdown(t *testing.T) {
 	}
 }
 
-// TestSweeper_UnclaimedTracesLeftInValkeyAcrossShutdown: when stopCh
-// closes, claim returns false on the post-stop tail. Workers finish
-// whatever they have already claimed; the rest stays in Valkey for the
-// next pod's sweep. Per ADR §5.3.
 func TestSweeper_UnclaimedTracesLeftInValkeyAcrossShutdown(t *testing.T) {
 	t.Parallel()
 
@@ -742,7 +735,7 @@ func TestSweeper_UnclaimedTracesLeftInValkeyAcrossShutdown(t *testing.T) {
 	shutdownDone := make(chan error, 1)
 	go func() { shutdownDone <- s.Shutdown(context.Background()) }()
 
-	// Give the dispatcher time to observe stopCh and exit.
+	// Give the claim loop time to observe stopCh and exit.
 	time.Sleep(20 * time.Millisecond)
 	close(releaseDrain)
 
@@ -763,7 +756,7 @@ func TestSweeper_UnclaimedTracesLeftInValkeyAcrossShutdown(t *testing.T) {
 // blockingBuffer holds Drain mid-call so tests can observe shutdown
 // behavior with a Drain in flight. The first finalizable returned has
 // traceID; extra appears after it (used to verify post-stop traces stay
-// undispatched).
+// unclaimed).
 type blockingBuffer struct {
 	traceID [16]byte
 	extra   []buffer.Finalizable

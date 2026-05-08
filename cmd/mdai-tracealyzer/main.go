@@ -163,11 +163,9 @@ func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		zap.Strings("readiness_pending", ready.Pending()),
 	)
 
-	// Registration order encodes dependency order: consumers/sinks first,
-	// producers last. Reverse Shutdown therefore drains the data path
-	// downstream-first (sweeper → ingest → emitter). The sweeper's gate on
-	// ready.WaitChan() guards destructive Drain until the schema and emitter
-	// probes have both reported healthy.
+	// Registration order is dependency order: sinks first, sources last.
+	// Reverse Shutdown currently stops sweeper before ingest; BUG-001 tracks
+	// reordering so external ingest stops before the sweeper wait.
 	sup := run.New(cfg.Service.ShutdownGrace.Duration(), logger,
 		admin,
 		schemaProbe,

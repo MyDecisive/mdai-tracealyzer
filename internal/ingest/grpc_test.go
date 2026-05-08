@@ -189,7 +189,7 @@ func TestGRPCServer_Shutdown_HaltsServer(t *testing.T) {
 	}
 }
 
-func TestGRPCServer_StartIsNonBlockingShutdownHalts(t *testing.T) {
+func TestGRPCServer_StartServesAndShutdownHalts(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
@@ -200,10 +200,31 @@ func TestGRPCServer_StartIsNonBlockingShutdownHalts(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
+	addr := server.Addr()
+	if addr == nil {
+		t.Fatal("Addr() returned nil after Start")
+	}
+	conn, err := grpc.NewClient(addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	client := coltracepb.NewTraceServiceClient(conn)
+
+	if _, err := client.Export(t.Context(), &coltracepb.ExportTraceServiceRequest{}); err != nil {
+		t.Fatalf("Export before Shutdown: %v", err)
+	}
+
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stopCancel()
 	if err := server.Shutdown(stopCtx); err != nil {
 		t.Fatalf("Shutdown: %v", err)
+	}
+
+	postCtx, postCancel := context.WithTimeout(context.Background(), time.Second)
+	defer postCancel()
+	if _, err := client.Export(postCtx, &coltracepb.ExportTraceServiceRequest{}); err == nil {
+		t.Error("Export succeeded after Shutdown; expected failure")
 	}
 }
 
