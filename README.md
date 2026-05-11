@@ -138,6 +138,10 @@ The `topology_` metrics exposed are:
 
 - `topology_emissions_failed_total` — topology rows dropped before a successful GreptimeDB write.
 
+### Operational dashboard
+
+A Grafana dashboard built on these metrics is shipped from the `mdai-hub` charts project (auto-loaded by the kube-prometheus-stack Grafana sidecar). It covers ingest/buffer rates, sweep and finalization triggers, compute latency percentiles, orphan spans/bytes, and emit success ratio, with `namespace` and `pod` template variables for multi-replica deployments.
+
 ### Tear down
 
 ```sh

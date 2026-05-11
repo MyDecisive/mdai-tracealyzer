@@ -1,11 +1,11 @@
 KIND_CLUSTER_NAME ?= mdai
 KUBECTL_CONTEXT   ?= kind-$(KIND_CLUSTER_NAME)
 NAMESPACE         ?= mdai
-DOCKER_TAG        ?= 0.1.0
+DOCKER_TAG        ?= 0.1.1
 LOCAL_VALUES      ?= deployment/values-local.yaml
 CHART_VERSION     ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
 ifeq ($(CHART_VERSION),)
-CHART_VERSION := 0.1.0
+CHART_VERSION := 0.1.1
 endif
 BUILD_PLATFORMS   ?= linux/arm64,linux/amd64
 GOTOOLCHAIN       ?= go1.25.0
