@@ -164,16 +164,17 @@ func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	)
 
 	// Registration order is dependency order: sinks first, sources last.
-	// Reverse Shutdown currently stops sweeper before ingest; BUG-001 tracks
-	// reordering so external ingest stops before the sweeper wait.
+	// Reverse Shutdown closes ingest before the sweeper waits on in-flight
+	// Drain, so a degraded Valkey can't keep HTTP/gRPC accepting traffic
+	// past the shutdown grace.
 	sup := run.New(cfg.Service.ShutdownGrace.Duration(), logger,
 		admin,
 		schemaProbe,
 		emitter,
 		emitterProbe,
+		sweeper,
 		grpcServer,
 		httpServer,
-		sweeper,
 	)
 	sup.OnShutdown(ready.MarkShuttingDown)
 	return sup.Run(ctx)

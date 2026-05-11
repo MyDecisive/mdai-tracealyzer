@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -114,8 +115,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 func (s *Supervisor) shutdownComponents(stopCtx context.Context) []error {
 	var stopErrs []error
-	for i := len(s.components) - 1; i >= 0; i-- {
-		c := s.components[i]
+	for _, c := range slices.Backward(s.components) {
 		s.logger.Info("supervisor: shutting down component", zap.String("name", c.Name()))
 		started := time.Now()
 		err := c.Shutdown(stopCtx)
