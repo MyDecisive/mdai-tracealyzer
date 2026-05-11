@@ -157,6 +157,27 @@ Non-destructive reads (sweep `Scan`, probe checks) take explicit
 deadlines because a missed read costs at most a retry on the next
 tick.
 
+## Emitter shutdown
+
+The emitter's shutdown ctx is a hard budget. `Emitter.Shutdown(ctx)`
+closes the worker's stop channel and waits for the worker goroutine
+to finish. If the worker exits before the ctx expires, the emitter
+drains its queue into the pending batch and calls `flushAll(ctx, …)`
+to write whatever remains. If the ctx expires first, `Shutdown`
+cancels the writer's in-flight context (`cancelWrites`), waits for
+the worker to exit, drains the queue, and records every remaining
+row in the pending batch on `topology_emissions_failed_total` with
+reason `"shutdown grace expired"`. The returned error joins
+`ctx.Err()` with any `writer.Close` error.
+
+No post-grace write or flush is intentionally started. The emitter
+does not derive a post-grace context via `context.WithoutCancel`,
+does not reserve a final-flush slice of the grace, and does not
+retry against an already-canceled ctx. Operators sizing `shutdown_grace` for rollout
+drain must therefore include the emitter's retry/timeout envelope
+(`flush_interval + timeout × (max_retries + 1)`); anything that does
+not fit is counted as dropped, not silently delayed.
+
 ## Decisions already taken
 
 The following alternatives were considered and rejected; future
@@ -168,7 +189,8 @@ counter-argument.
 | `Start` blocks for the component's lifetime (old pre-`vs/fixes` shape) | Post-Start failures had no escalation path. Replaced by Start-returns-then-Host.Fatal. |
 | `Shutdown` honours ctx and abandons its goroutine on grace expiry | A surviving sweeper iteration can complete a destructive `Drain` and then call `Emit` on an already-closed emitter, returning `ErrClosed` and losing rows. Shutdown waits on its goroutine unconditionally. |
 | Wrapping `Drain` or the whole sweep `tick` in `context.WithTimeout` | Interrupts the destructive pipeline mid-flight; risks partial Valkey state. Liveness is bounded by `buffer.valkey_operation_timeout` (passed to `valkey.ClientOption.ConnWriteTimeout`) instead. |
-| Emitter's final flush gets an *additive* deadline via `WithoutCancel(ctx)` past the supervisor's grace | Violates the grace contract; will eventually trip Kubernetes SIGKILL mid-write. The proposed shape is a reserved-budget split *inside* the grace. |
+| Emitter's final flush gets an *additive* deadline via `WithoutCancel(ctx)` past the supervisor's grace | Violates the grace contract; will eventually trip Kubernetes SIGKILL mid-write. The shutdown ctx is the hard budget; rows that do not fit are recorded as dropped. |
+| Emitter reserves a split-budget (e.g. 80/20) inside the shutdown grace for a final post-cancel flush | Hides effective grace from operators and complicates ordering. The single shutdown ctx is the only budget. |
 | `Start` runs components in parallel via `errgroup` | Unnecessary once Start returns promptly; sequential calls give clean log ordering and let a Start error abort registration without cancelling earlier components' background work. |
 | `Host.Fatal` blocks until the supervisor acknowledges | The supervisor may already be in shutdown; blocking would deadlock the serve goroutine. `Host.Fatal` is non-blocking with a fatal channel and an overflow list. |
 

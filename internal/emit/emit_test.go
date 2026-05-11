@@ -583,12 +583,14 @@ func TestEmitter_ShutdownDuringInFlightWriteIsSafe(t *testing.T) {
 }
 
 type hangingWriter struct {
-	entered chan struct{}
-	release chan struct{}
-	closed  atomic.Bool
+	entered    chan struct{}
+	release    chan struct{}
+	closed     atomic.Bool
+	writeCalls atomic.Int32
 }
 
 func (w *hangingWriter) Write(ctx context.Context, _ writeBatch) error {
+	w.writeCalls.Add(1)
 	select {
 	case w.entered <- struct{}{}:
 	default:
@@ -650,10 +652,82 @@ func TestEmitter_ShutdownClosesWriterWhenContextExpiresMidWrite(t *testing.T) {
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer stopCancel()
-	_ = e.Shutdown(stopCtx)
+	stopErr := e.Shutdown(stopCtx)
 
+	if stopErr == nil {
+		t.Fatal("Shutdown returned nil when ctx expired mid-write; want ctx error")
+	}
+	if !errors.Is(stopErr, context.DeadlineExceeded) && !errors.Is(stopErr, context.Canceled) {
+		t.Fatalf("Shutdown error = %v; want context.DeadlineExceeded or context.Canceled", stopErr)
+	}
 	if !w.closed.Load() {
 		t.Fatal("writer.Close() was not called: Shutdown returned with ctx expired and leaked the writer")
+	}
+	if got := w.writeCalls.Load(); got != 1 {
+		t.Fatalf("writer.Write call count = %d; want 1 (no extra final flush with already-canceled ctx)", got)
+	}
+}
+
+func TestEmitter_ShutdownGraceExpiryRecordsQueuedRowsAsDropped(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	m, err := newMetrics(reg)
+	if err != nil {
+		t.Fatalf("newMetrics: %v", err)
+	}
+
+	cfg := config.Emitter{
+		TableTTL:       "14d",
+		Timeout:        config.Duration(time.Hour),
+		MaxRetries:     0,
+		InitialBackoff: config.Duration(time.Millisecond),
+		BatchSize:      1,
+		FlushInterval:  config.Duration(time.Hour),
+		QueueCapacity:  16,
+	}
+
+	w := &hangingWriter{
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	t.Cleanup(func() { close(w.release) })
+
+	e := newWithWriter(cfg, zap.NewNop(), m, w, time.Now)
+	if err := e.Start(t.Context(), noopHost{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if emitErr := e.Emit(context.Background(), sampleRows(1)); emitErr != nil {
+		t.Fatalf("Emit (in-flight): %v", emitErr)
+	}
+
+	select {
+	case <-w.entered:
+	case <-time.After(time.Second):
+		t.Fatal("writer.Write was never called; cannot exercise stuck-write path")
+	}
+
+	const queuedRows = 4
+	for range queuedRows {
+		if emitErr := e.Emit(context.Background(), sampleRows(1)); emitErr != nil {
+			t.Fatalf("Emit (queued): %v", emitErr)
+		}
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer stopCancel()
+	stopErr := e.Shutdown(stopCtx)
+	if stopErr == nil {
+		t.Fatal("Shutdown returned nil when ctx expired; want ctx error")
+	}
+	if !errors.Is(stopErr, context.DeadlineExceeded) && !errors.Is(stopErr, context.Canceled) {
+		t.Fatalf("Shutdown error = %v; want context.DeadlineExceeded or context.Canceled", stopErr)
+	}
+
+	wantDropped := float64(1 + queuedRows)
+	if got := testutil.ToFloat64(m.emissionsFailed); got != wantDropped {
+		t.Fatalf("topology_emissions_failed_total = %v; want %v (1 in-flight + %d queued)", got, wantDropped, queuedRows)
 	}
 }
 

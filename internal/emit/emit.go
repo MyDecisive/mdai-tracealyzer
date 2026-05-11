@@ -170,10 +170,18 @@ func (e *Emitter) Shutdown(ctx context.Context) error {
 	}
 
 	e.pending = e.drainQueue(e.pending)
+
 	var errs []error
-	if err := e.flushAll(ctx, &e.pending); err != nil {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if len(e.pending) > 0 {
+			e.recordDroppedRows("shutdown grace expired", e.pending, ctxErr)
+			e.pending = nil
+		}
+		errs = append(errs, ctxErr)
+	} else if err := e.flushAll(ctx, &e.pending); err != nil {
 		errs = append(errs, fmt.Errorf("flush during shutdown: %w", err))
 	}
+
 	if err := e.writer.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("close writer: %w", err))
 	}
