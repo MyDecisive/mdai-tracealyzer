@@ -205,11 +205,14 @@ These bind future changes:
   or in-component deadlines that fit inside grace. For the sweeper
   this bound is `buffer.valkey_operation_timeout` plus the
   compute/emit overhead for one in-flight trace per worker.
-- **No destructive write returns success without an emit path.** A
-  successful `Drain` (Valkey state removed) must reach the emitter
-  queue before the emitter closes. The component ordering protects
-  this on graceful shutdown; the sweeper-joins-on-Shutdown rule
-  protects it on grace-expired shutdown.
+- **Successful Drain reaches the emitter queue.** A successful
+  Drain (Valkey state removed) must enqueue its row before the
+  emitter closes. The component ordering protects this on graceful
+  shutdown; the sweeper-joins-on-Shutdown rule protects it on
+  grace-expired shutdown. The emitter does not guarantee that
+  queued rows are flushed once the shutdown ctx expires; rows past
+  the grace are recorded on `topology_emissions_failed_total` with
+  reason `"shutdown grace expired"` and are not retried.
 - **Shutdown is idempotent and pre-Start-safe.** A `Shutdown` call
   without a prior `Start` is a no-op (or a listener-close); a
   second `Shutdown` call is a no-op via `sync.Once`.

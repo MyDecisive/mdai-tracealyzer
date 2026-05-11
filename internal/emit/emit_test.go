@@ -587,6 +587,7 @@ type hangingWriter struct {
 	release    chan struct{}
 	closed     atomic.Bool
 	writeCalls atomic.Int32
+	closeCalls atomic.Int32
 }
 
 func (w *hangingWriter) Write(ctx context.Context, _ writeBatch) error {
@@ -607,6 +608,7 @@ func (*hangingWriter) HealthCheck(_ context.Context) error { return nil }
 
 func (w *hangingWriter) Close() error {
 	w.closed.Store(true)
+	w.closeCalls.Add(1)
 	return nil
 }
 
@@ -728,6 +730,99 @@ func TestEmitter_ShutdownGraceExpiryRecordsQueuedRowsAsDropped(t *testing.T) {
 	wantDropped := float64(1 + queuedRows)
 	if got := testutil.ToFloat64(m.emissionsFailed); got != wantDropped {
 		t.Fatalf("topology_emissions_failed_total = %v; want %v (1 in-flight + %d queued)", got, wantDropped, queuedRows)
+	}
+}
+
+func TestEmitter_ShutdownWithPreCancelledCtxReturnsCtxErr(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	m, err := newMetrics(reg)
+	if err != nil {
+		t.Fatalf("newMetrics: %v", err)
+	}
+
+	w := &fakeWriter{}
+	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, w, fixedNow())
+	if err := e.Start(t.Context(), noopHost{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopCtx, stopCancel := context.WithCancel(context.Background())
+	stopCancel()
+
+	stopErr := e.Shutdown(stopCtx)
+	if !errors.Is(stopErr, context.Canceled) {
+		t.Fatalf("Shutdown error = %v; want context.Canceled", stopErr)
+	}
+	if !w.closed {
+		t.Fatal("writer.Close was not called when Shutdown ran with pre-cancelled ctx")
+	}
+}
+
+func TestEmitter_ShutdownAfterGraceExpiryIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	m, err := newMetrics(reg)
+	if err != nil {
+		t.Fatalf("newMetrics: %v", err)
+	}
+
+	cfg := config.Emitter{
+		TableTTL:       "14d",
+		Timeout:        config.Duration(time.Hour),
+		MaxRetries:     0,
+		InitialBackoff: config.Duration(time.Millisecond),
+		BatchSize:      1,
+		FlushInterval:  config.Duration(time.Hour),
+		QueueCapacity:  4,
+	}
+
+	w := &hangingWriter{
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	t.Cleanup(func() { close(w.release) })
+
+	e := newWithWriter(cfg, zap.NewNop(), m, w, time.Now)
+	if err := e.Start(t.Context(), noopHost{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if emitErr := e.Emit(context.Background(), sampleRows(1)); emitErr != nil {
+		t.Fatalf("Emit: %v", emitErr)
+	}
+	select {
+	case <-w.entered:
+	case <-time.After(time.Second):
+		t.Fatal("writer.Write was never called")
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer stopCancel()
+	if err := e.Shutdown(stopCtx); err == nil {
+		t.Fatal("first Shutdown returned nil; want ctx error")
+	}
+
+	dropsAfterFirst := testutil.ToFloat64(m.emissionsFailed)
+	writesAfterFirst := w.writeCalls.Load()
+	closesAfterFirst := w.closeCalls.Load()
+	if closesAfterFirst != 1 {
+		t.Fatalf("writer.Close calls after first Shutdown = %d; want 1", closesAfterFirst)
+	}
+
+	if err := e.Shutdown(stopCtx); err != nil {
+		t.Fatalf("second Shutdown returned %v; want nil (idempotent)", err)
+	}
+	if got := testutil.ToFloat64(m.emissionsFailed); got != dropsAfterFirst {
+		t.Fatalf("emissionsFailed after second Shutdown = %v; want %v (no double-count)", got, dropsAfterFirst)
+	}
+	if got := w.writeCalls.Load(); got != writesAfterFirst {
+		t.Fatalf("writer.Write calls after second Shutdown = %d; want %d", got, writesAfterFirst)
+	}
+	if got := w.closeCalls.Load(); got != closesAfterFirst {
+		t.Fatalf("writer.Close calls after second Shutdown = %d; want %d (close exactly once)", got, closesAfterFirst)
 	}
 }
 
