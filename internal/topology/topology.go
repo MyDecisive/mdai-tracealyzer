@@ -125,8 +125,7 @@ func computeRoot(
 		acc.recordSpan(span, current.depth, childrenByParent[current.spanID])
 
 		children := childrenByParent[current.spanID]
-		for i := len(children) - 1; i >= 0; i-- {
-			childID := children[i]
+		for _, childID := range slices.Backward(children) {
 			child := spans[childID]
 			depth := current.depth
 			if child.Service != span.Service {
