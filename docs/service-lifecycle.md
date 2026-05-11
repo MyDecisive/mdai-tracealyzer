@@ -129,9 +129,29 @@ interruption between server-processed and client-received leaves an
 ambiguous outcome (state gone server-side, error returned to
 caller, rows never reach emitter).
 
-Liveness for destructive paths is bounded at the I/O boundary by
-client-level timeouts (the Valkey client's per-operation timeout),
-not by `context.WithTimeout` wrapping the destructive call.
+`Sweeper.Shutdown` therefore joins on the sweep goroutine
+unconditionally and does not honour the shutdown ctx. Drain is
+called with `context.Background()` — neither `Shutdown` nor the
+shutdown ctx cancels it. The shutdown ctx is the *budget* the
+supervisor will wait, not a cancellation signal for the destructive
+path.
+
+Liveness for the destructive path is bounded at the I/O boundary by
+the Valkey client's per-operation timeout
+(`buffer.valkey_operation_timeout`), plumbed into
+`valkey.ClientOption.ConnWriteTimeout`. A stalled or unresponsive
+Valkey connection fails the in-flight Drain within that bound; the
+sweeper then joins and Shutdown returns. `ShutdownGrace` must be
+sized larger than the worst-case sweeper drain window,
+approximately `valkey_operation_timeout + compute/emit overhead`
+for one claimed trace per worker still in-flight when Shutdown
+fires.
+
+This is a bounded-shutdown/liveness fix, not a no-loss guarantee.
+An ambiguous Drain — Valkey processed the `EXEC` server-side but
+the client times out before reading the reply — still loses those
+rows. The timeout caps how long shutdown waits; it does not
+recover state that was destructively removed without a reply.
 
 Non-destructive reads (sweep `Scan`, probe checks) take explicit
 deadlines because a missed read costs at most a retry on the next
@@ -147,7 +167,7 @@ counter-argument.
 |---|---|
 | `Start` blocks for the component's lifetime (old pre-`vs/fixes` shape) | Post-Start failures had no escalation path. Replaced by Start-returns-then-Host.Fatal. |
 | `Shutdown` honours ctx and abandons its goroutine on grace expiry | A surviving sweeper iteration can complete a destructive `Drain` and then call `Emit` on an already-closed emitter, returning `ErrClosed` and losing rows. Shutdown waits on its goroutine unconditionally. |
-| Wrapping `Drain` or the whole sweep `tick` in `context.WithTimeout` | Interrupts the destructive pipeline mid-flight; risks partial Valkey state. Liveness is bounded by the Valkey client's per-operation timeout instead. |
+| Wrapping `Drain` or the whole sweep `tick` in `context.WithTimeout` | Interrupts the destructive pipeline mid-flight; risks partial Valkey state. Liveness is bounded by `buffer.valkey_operation_timeout` (passed to `valkey.ClientOption.ConnWriteTimeout`) instead. |
 | Emitter's final flush gets an *additive* deadline via `WithoutCancel(ctx)` past the supervisor's grace | Violates the grace contract; will eventually trip Kubernetes SIGKILL mid-write. The proposed shape is a reserved-budget split *inside* the grace. |
 | `Start` runs components in parallel via `errgroup` | Unnecessary once Start returns promptly; sequential calls give clean log ordering and let a Start error abort registration without cancelling earlier components' background work. |
 | `Host.Fatal` blocks until the supervisor acknowledges | The supervisor may already be in shutdown; blocking would deadlock the serve goroutine. `Host.Fatal` is non-blocking with a fatal channel and an overflow list. |
@@ -160,7 +180,9 @@ These bind future changes:
   signal-receive to `Supervisor.Run` return ≤
   `cfg.Service.ShutdownGrace`. Components that need longer than
   grace are bugs; their `Shutdown` must be bounded by client-level
-  or in-component deadlines that fit inside grace.
+  or in-component deadlines that fit inside grace. For the sweeper
+  this bound is `buffer.valkey_operation_timeout` plus the
+  compute/emit overhead for one in-flight trace per worker.
 - **No destructive write returns success without an emit path.** A
   successful `Drain` (Valkey state removed) must reach the emitter
   queue before the emitter closes. The component ordering protects

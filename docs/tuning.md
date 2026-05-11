@@ -21,6 +21,7 @@ Three queues sit between stages: the per-trace Valkey hash, the sweeper's per-ti
 | `max_ttl` | `TRACEALYZER_MAX_TTL` | `10m` | Covers slower upstream traces; increases Valkey memory use. | Bounds buffer footprint; raises `trigger="max_ttl"` and orphan rates. |
 | `sweep_interval` | `TRACEALYZER_SWEEP_INTERVAL` | `5s` | Reduces Valkey scan QPS; raises finalization latency. | Finalizes sooner; raises Valkey scan QPS. |
 | `sweep_worker_pool_size` | `TRACEALYZER_SWEEP_WORKER_POOL_SIZE` | `runtime.NumCPU()` | Clears larger finalize backlogs per tick. | Reduces CPU and Valkey pressure; allows backlog growth. |
+| `valkey_operation_timeout` | `TRACEALYZER_VALKEY_OPERATION_TIMEOUT` | `10s` | Tolerates slower Valkey round trips; lengthens worst-case shutdown drain. | Improves shutdown liveness; raises the chance of an ambiguous Drain timeout under network stress (server processed `EXEC`, client read failed). |
 
 ### Emitter (`emitter.*`)
 
@@ -37,7 +38,7 @@ Three queues sit between stages: the per-trace Valkey hash, the sweeper's per-ti
 
 | Parameter | Env | Default | Notes |
 |---|---|---|---|
-| `shutdown_grace` | `TRACEALYZER_SHUTDOWN_GRACE` | `30s` | Upper bound on orderly drain. Must exceed `flush_interval + timeout × (max_retries + 1)` or in-flight rows are dropped on rollout. |
+| `shutdown_grace` | `TRACEALYZER_SHUTDOWN_GRACE` | `30s` | Upper bound on orderly drain. Must exceed `flush_interval + timeout × (max_retries + 1)` *and* `valkey_operation_timeout` plus per-worker compute/emit overhead, or in-flight rows are dropped on rollout. |
 | `log_level` | `TRACEALYZER_LOG_LEVEL` | `info` | `debug` is appropriate for incident triage; not recommended for steady-state at high QPS. |
 
 ## Profiles
@@ -95,5 +96,6 @@ Absorbs minute-scale GreptimeDB outages without dropping rows. `shutdown_grace` 
 - `quiet_period < sweep_interval` has no effect; the effective floor on finalization latency is `sweep_interval`.
 - Raising `batch_size` without raising `queue_capacity` shifts the bottleneck to the queue.
 - `flush_interval` is a freshness ceiling, not a throughput control. Lowering it raises GreptimeDB write QPS without increasing row throughput.
-- `shutdown_grace` must exceed `flush_interval + timeout × (max_retries + 1)` or rollouts drop in-flight rows.
+- `shutdown_grace` must exceed `flush_interval + timeout × (max_retries + 1)` *and* `valkey_operation_timeout` plus per-worker compute/emit overhead, or rollouts drop in-flight rows.
+- `valkey_operation_timeout` should be less than `shutdown_grace` and large enough for normal Valkey round trips. Sweeper `Drain` is not cancelled by shutdown ctx; this is the bound that lets Shutdown return within grace. Lowering it improves shutdown liveness but increases the chance of an ambiguous Drain timeout under network stress.
 - `sweep_worker_pool_size` defaults to `runtime.NumCPU()` of the pod, not the node. Set it explicitly when running under a CPU limit.

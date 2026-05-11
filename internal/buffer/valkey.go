@@ -28,12 +28,13 @@ type ValkeyBuffer struct {
 }
 
 type ValkeyOptions struct {
-	Addr     string
-	DB       int
-	Password string
-	MaxTTL   time.Duration
-	Metrics  *Metrics
-	Logger   *zap.Logger
+	Addr             string
+	DB               int
+	Password         string
+	MaxTTL           time.Duration
+	OperationTimeout time.Duration
+	Metrics          *Metrics
+	Logger           *zap.Logger
 }
 
 // NewValkeyBuffer blocks until the initial dial succeeds or ctx is cancelled.
@@ -44,6 +45,9 @@ func NewValkeyBuffer(ctx context.Context, opts ValkeyOptions) (*ValkeyBuffer, er
 	}
 	if opts.MaxTTL <= 0 {
 		return nil, errors.New("valkey buffer: max_ttl must be > 0")
+	}
+	if opts.OperationTimeout <= 0 {
+		return nil, errors.New("valkey buffer: operation_timeout must be > 0")
 	}
 	if opts.Logger == nil {
 		return nil, errors.New("valkey buffer: logger is required")
@@ -64,9 +68,10 @@ func dialWithBackoff(ctx context.Context, opts ValkeyOptions) (valkey.Client, er
 
 	client, err := backoff.Retry(ctx, func() (valkey.Client, error) {
 		return valkey.NewClient(valkey.ClientOption{
-			InitAddress: []string{opts.Addr},
-			SelectDB:    opts.DB,
-			Password:    opts.Password,
+			InitAddress:      []string{opts.Addr},
+			SelectDB:         opts.DB,
+			Password:         opts.Password,
+			ConnWriteTimeout: opts.OperationTimeout,
 		})
 	},
 		backoff.WithBackOff(eb),

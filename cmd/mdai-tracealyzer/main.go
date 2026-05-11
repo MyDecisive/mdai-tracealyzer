@@ -99,12 +99,13 @@ func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	sweepMetrics := sweep.NewMetrics(registry)
 
 	valkeyBuffer, err := buffer.NewValkeyBuffer(ctx, buffer.ValkeyOptions{
-		Addr:     cfg.Buffer.ValkeyAddr,
-		DB:       cfg.Buffer.ValkeyDB,
-		Password: cfg.Buffer.ValkeyPassword,
-		MaxTTL:   cfg.Buffer.MaxTTL.Duration(),
-		Metrics:  bufferMetrics,
-		Logger:   logger,
+		Addr:             cfg.Buffer.ValkeyAddr,
+		DB:               cfg.Buffer.ValkeyDB,
+		Password:         cfg.Buffer.ValkeyPassword,
+		MaxTTL:           cfg.Buffer.MaxTTL.Duration(),
+		OperationTimeout: cfg.Buffer.ValkeyOperationTimeout.Duration(),
+		Metrics:          bufferMetrics,
+		Logger:           logger,
 	})
 	if err != nil {
 		return fmt.Errorf("valkey buffer: %w", err)
