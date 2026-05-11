@@ -122,12 +122,16 @@ func (h *grpcTraceHandler) Export(
 	records, malformed := Normalize(req.GetResourceSpans())
 	h.metrics.incSpansReceived(len(records) + malformed)
 	h.metrics.incSpansMalformed(malformed)
-	rejected, firstErr := record(ctx, h.recorder, h.logger, records)
-	if isTransient(firstErr) {
+	out := record(ctx, h.recorder, h.logger, records)
+	// Transient takes priority over permanent: clients do not retry
+	// PartialSuccess, so reporting a transient rejection that way would
+	// silently drop a recoverable valid span.
+	if out.transient != nil {
 		h.logger.Warn("ingest: transient backpressure",
-			zap.Int("rejected", rejected),
-			zap.Error(firstErr))
-		return nil, status.Error(codes.Unavailable, classifyForClient(firstErr))
+			zap.Int("rejected", out.rejected),
+			zap.Int("malformed", malformed),
+			zap.Error(out.transient))
+		return nil, status.Error(codes.Unavailable, classifyForClient(out.transient))
 	}
-	return buildExportResponse(rejected, malformed, firstErr, h.logger), nil
+	return buildExportResponse(out.rejected, malformed, out.permanent, h.logger), nil
 }

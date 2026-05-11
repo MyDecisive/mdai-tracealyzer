@@ -17,6 +17,8 @@ import (
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"go.uber.org/zap"
+	spb "google.golang.org/genproto/googleapis/rpc/status"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -275,6 +277,55 @@ func TestHTTPServer_ReportsRejectedSpans(t *testing.T) {
 	}
 	if count := counterValue(t, reg, "topology_spans_received_total"); count != 3 {
 		t.Errorf("spans_received counter = %v, want 3 (all decoded, incl. rejected)", count)
+	}
+}
+
+// TestHTTPServer_MixedRejectionsReturnsUnavailable mirrors the gRPC
+// policy lock-in: any transient rejection in a batch — even mixed with
+// permanent ones — returns 503 so the client retries the whole batch
+// and recovers the transient rows.
+func TestHTTPServer_MixedRejectionsReturnsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	rec := &fakeRecorder{
+		rejectFn: func(r buffer.SpanRecord) error {
+			if r.SpanID == rootSpanID {
+				return buffer.ErrInvalidSpan
+			}
+			return buffer.ErrBufferFull
+		},
+	}
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	url, cleanup := startHTTP(t, server)
+	t.Cleanup(cleanup)
+
+	body := mustMarshal(t, &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{
+			resourceSpans("svc", []*tracepb.Span{
+				rootSpan(traceIDAllBytes, rootSpanID, "r",
+					tracepb.Span_SPAN_KIND_SERVER, tracepb.Status_STATUS_CODE_OK),
+				childSpan(traceIDAllBytes, childSpanID, rootSpanID, "c",
+					tracepb.Span_SPAN_KIND_INTERNAL, tracepb.Status_STATUS_CODE_OK),
+			}),
+		},
+	})
+	resp := doPost(t, url, "application/x-protobuf", body)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d (want 503), body = %q", resp.StatusCode, respBody)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/x-protobuf" {
+		t.Errorf("Content-Type = %q, want application/x-protobuf", ct)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	st := &spb.Status{}
+	if err := proto.Unmarshal(respBody, st); err != nil {
+		t.Fatalf("decode google.rpc.Status body: %v", err)
+	}
+	if got, want := st.GetCode(), int32(codes.Unavailable); got != want {
+		t.Errorf("Status.Code = %d, want %d (Unavailable)", got, want)
 	}
 }
 

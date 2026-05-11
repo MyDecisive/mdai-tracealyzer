@@ -19,29 +19,36 @@ type Recorder interface {
 	Put(ctx context.Context, r buffer.SpanRecord) error
 }
 
+type recordOutcome struct {
+	rejected  int
+	transient error
+	permanent error
+}
+
 func record(
 	ctx context.Context,
 	rec Recorder,
 	logger *zap.Logger,
 	records []buffer.SpanRecord,
-) (int, error) {
-	var (
-		rejected int
-		firstErr error
-	)
+) recordOutcome {
+	var out recordOutcome
 	for _, r := range records {
 		logger.Debug("span received",
 			zap.String("trace_id", hex.EncodeToString(r.TraceID[:])),
 			zap.String("span_id", hex.EncodeToString(r.SpanID[:])),
 		)
 		if err := rec.Put(ctx, r); err != nil {
-			rejected++
-			if firstErr == nil || (isTransient(err) && !isTransient(firstErr)) {
-				firstErr = err
+			out.rejected++
+			if isTransient(err) {
+				if out.transient == nil {
+					out.transient = err
+				}
+			} else if out.permanent == nil {
+				out.permanent = err
 			}
 		}
 	}
-	return rejected, firstErr
+	return out
 }
 
 func buildExportResponse(rejected, malformed int, firstErr error, logger *zap.Logger) *coltracepb.ExportTraceServiceResponse {

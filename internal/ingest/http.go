@@ -16,6 +16,8 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/run"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -187,15 +189,20 @@ func (h *httpTraceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	records, malformed := Normalize(req.GetResourceSpans())
 	h.metrics.incSpansReceived(len(records) + malformed)
 	h.metrics.incSpansMalformed(malformed)
-	rejected, firstErr := record(r.Context(), h.recorder, h.logger, records)
-	if isTransient(firstErr) {
+	res := record(r.Context(), h.recorder, h.logger, records)
+	// Transient takes priority over permanent: clients do not retry
+	// PartialSuccess, so reporting a transient rejection that way would
+	// silently drop a recoverable valid span.
+	if res.transient != nil {
 		h.logger.Warn("ingest: transient backpressure",
-			zap.Int("rejected", rejected),
-			zap.Error(firstErr))
-		http.Error(w, classifyForClient(firstErr), http.StatusServiceUnavailable)
+			zap.Int("rejected", res.rejected),
+			zap.Int("malformed", malformed),
+			zap.Error(res.transient))
+		writeRPCStatus(w, http.StatusServiceUnavailable, codes.Unavailable,
+			classifyForClient(res.transient), h.logger)
 		return
 	}
-	out, marshalErr := proto.Marshal(buildExportResponse(rejected, malformed, firstErr, h.logger))
+	out, marshalErr := proto.Marshal(buildExportResponse(res.rejected, malformed, res.permanent, h.logger))
 	if marshalErr != nil {
 		h.logger.Error("encode trace response", zap.Error(marshalErr))
 		http.Error(w, "encode response", http.StatusInternalServerError)
@@ -204,4 +211,19 @@ func (h *httpTraceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentTypeProtobuf)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
+}
+
+// writeRPCStatus emits a protobuf-encoded google.rpc.Status body, the
+// shape OTLP/HTTP requires for 4xx/5xx responses. Falls back to a plain
+// text body only if Status proto marshaling itself fails.
+func writeRPCStatus(w http.ResponseWriter, httpCode int, grpcCode codes.Code, msg string, logger *zap.Logger) {
+	body, err := proto.Marshal(status.New(grpcCode, msg).Proto())
+	if err != nil {
+		logger.Error("encode status proto", zap.Error(err))
+		http.Error(w, msg, httpCode)
+		return
+	}
+	w.Header().Set("Content-Type", contentTypeProtobuf)
+	w.WriteHeader(httpCode)
+	_, _ = w.Write(body)
 }
