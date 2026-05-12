@@ -36,7 +36,8 @@ func main() {
 	stopTracer := common.StartTracer(service)
 	defer stopTracer()
 
-	logger := common.NewLogger(service)
+	logger := common.NewLogger(service, common.VerbosityFromEnv())
+	common.StartHeartbeat(logger)
 	if err := fn(service, logger); err != nil {
 		logger.Info(context.Background(), "role exited", map[string]any{
 			"event": "role_exited",

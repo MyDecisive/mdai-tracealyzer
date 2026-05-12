@@ -28,7 +28,7 @@ func runGateway(service string, logger *common.Logger) error {
 	if redisAddr != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		cache, err = common.NewRedis(ctx, service, redisAddr)
+		cache, err = common.NewRedis(ctx, logger, service, redisAddr)
 		if err != nil {
 			return err
 		}
@@ -172,43 +172,70 @@ func runGateway(service string, logger *common.Logger) error {
 	})
 
 	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/wide", func(ctx context.Context, r *http.Request, meta common.RequestMeta) (any, error) {
+		grpcCheck := func(ctx context.Context, operation, method string, do func(context.Context) (*pb.InventoryReply, error)) (any, error) {
+			grpcCtx := common.WithRequestMetadata(ctx, meta.RequestID, meta.Scenario)
+			reply, err := do(grpcCtx)
+			if err != nil {
+				return nil, err
+			}
+			logger.Info(ctx, "downstream call completed", map[string]any{
+				"event":       "downstream_call_completed",
+				"request_id":  meta.RequestID,
+				"scenario":    meta.Scenario,
+				"operation":   operation,
+				"transport":   "grpc",
+				"grpc.method": method,
+			})
+			return map[string]any{
+				"success":        reply.Success,
+				"status":         reply.Status,
+				"warehouse":      reply.Warehouse,
+				"available":      reply.Available,
+				"reservation_id": reply.ReservationId,
+			}, nil
+		}
+		inventoryReq := &pb.InventoryRequest{
+			RequestId: meta.RequestID,
+			Scenario:  meta.Scenario,
+			SKU:       "coffee",
+			Quantity:  1,
+		}
+
 		calls := map[string]func(context.Context) (any, error){
-			"catalog": func(ctx context.Context) (any, error) {
+			"catalog_primary": func(ctx context.Context) (any, error) {
 				return common.JSONRequest(ctx, httpClient, logger, http.MethodGet, catalogURL+"/catalog", "gateway.fetch_catalog", meta, nil, nil)
 			},
-			"inventory_http": func(ctx context.Context) (any, error) {
+			"catalog_featured": func(ctx context.Context) (any, error) {
+				return common.JSONRequest(ctx, httpClient, logger, http.MethodGet, catalogURL+"/catalog", "gateway.fetch_featured", meta, nil, nil)
+			},
+			"inventory_http_check": func(ctx context.Context) (any, error) {
 				return common.JSONRequest(ctx, httpClient, logger, http.MethodGet, inventoryHTTPURL+"/availability", "gateway.fetch_inventory_http", meta, map[string]string{
 					"transport": "http",
 				}, nil)
 			},
-			"inventory_grpc": func(ctx context.Context) (any, error) {
-				grpcCtx := common.WithRequestMetadata(ctx, meta.RequestID, meta.Scenario)
-				reply, err := inventoryClient.CheckAvailability(grpcCtx, &pb.InventoryRequest{
-					RequestId: meta.RequestID,
-					Scenario:  meta.Scenario,
-					SKU:       "coffee",
-					Quantity:  1,
+			"inventory_http_reserve": func(ctx context.Context) (any, error) {
+				return common.JSONRequest(ctx, httpClient, logger, http.MethodPost, inventoryHTTPURL+"/reserve", "gateway.reserve_inventory_http", meta, map[string]string{
+					"transport": "http",
+				}, map[string]any{
+					"sku":      "coffee",
+					"quantity": 1,
 				})
-				if err != nil {
-					return nil, err
-				}
-				logger.Info(ctx, "downstream call completed", map[string]any{
-					"event":       "downstream_call_completed",
-					"request_id":  meta.RequestID,
-					"scenario":    meta.Scenario,
-					"operation":   "gateway.fetch_inventory_grpc",
-					"transport":   "grpc",
-					"grpc.method": "InventoryService/CheckAvailability",
-				})
-				return map[string]any{
-					"success":   reply.Success,
-					"status":    reply.Status,
-					"warehouse": reply.Warehouse,
-					"available": reply.Available,
-				}, nil
 			},
-			"payments": func(ctx context.Context) (any, error) {
+			"inventory_grpc_check": func(ctx context.Context) (any, error) {
+				return grpcCheck(ctx, "gateway.fetch_inventory_grpc", "InventoryService/CheckAvailability", func(c context.Context) (*pb.InventoryReply, error) {
+					return inventoryClient.CheckAvailability(c, inventoryReq)
+				})
+			},
+			"inventory_grpc_reserve": func(ctx context.Context) (any, error) {
+				return grpcCheck(ctx, "gateway.reserve_inventory_grpc", "InventoryService/ReserveItems", func(c context.Context) (*pb.InventoryReply, error) {
+					return inventoryClient.ReserveItems(c, inventoryReq)
+				})
+			},
+			"payments_authorize": func(ctx context.Context) (any, error) {
 				return common.JSONRequest(ctx, httpClient, logger, http.MethodGet, paymentsURL+"/authorize", "gateway.preauthorize_payment", meta, nil, nil)
+			},
+			"payments_quote": func(ctx context.Context) (any, error) {
+				return common.JSONRequest(ctx, httpClient, logger, http.MethodGet, paymentsURL+"/authorize", "gateway.quote_payment", meta, nil, nil)
 			},
 		}
 
@@ -227,18 +254,7 @@ func runGateway(service string, logger *common.Logger) error {
 		return response, nil
 	})
 
-	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/deep", func(ctx context.Context, r *http.Request, meta common.RequestMeta) (any, error) {
-		checkout, err := common.JSONRequest(ctx, httpClient, logger, http.MethodGet, checkoutURL+"/deep", "gateway.deep_chain", meta, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{
-			"request_id": meta.RequestID,
-			"scenario":   meta.Scenario,
-			"route":      "/deep",
-			"checkout":   checkout,
-		}, nil
-	})
+	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/deep", deepForwardHandler(httpClient, logger, checkoutURL, "gateway.deep_chain"))
 
 	addr := ":" + common.Getenv("PORT", "8080")
 	return http.ListenAndServe(addr, mux)

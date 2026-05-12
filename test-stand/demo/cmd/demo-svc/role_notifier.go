@@ -79,7 +79,7 @@ func runNotifier(service string, logger *common.Logger) error {
 		go func() {
 			defer wg.Done()
 			if err := c.Run(rootCtx, logger); err != nil && !errors.Is(err, context.Canceled) {
-				logger.Info(context.Background(), "consumer stopped with error", map[string]any{
+				logger.Error(context.Background(), "consumer stopped with error", map[string]any{
 					"event": "consumer_stopped",
 					"error": err.Error(),
 				})

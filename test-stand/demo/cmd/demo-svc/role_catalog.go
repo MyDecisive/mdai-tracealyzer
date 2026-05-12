@@ -9,13 +9,15 @@ import (
 )
 
 func runCatalog(service string, logger *common.Logger) error {
+	httpClient := common.NewTracedHTTPClient(service)
+	paymentsURL := common.Getenv("PAYMENTS_URL", "http://payments-api:8080")
 	dsn := common.Getenv("POSTGRES_DSN", "")
 	var pg *common.Postgres
 	if dsn != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		var err error
-		pg, err = common.NewPostgres(ctx, service, dsn)
+		pg, err = common.NewPostgres(ctx, logger, service, dsn)
 		if err != nil {
 			return err
 		}
@@ -23,6 +25,7 @@ func runCatalog(service string, logger *common.Logger) error {
 	}
 
 	mux := http.NewServeMux()
+	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/deep", deepForwardHandler(httpClient, logger, paymentsURL, "catalog.deep_chain"))
 	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/catalog", func(ctx context.Context, r *http.Request, meta common.RequestMeta) (any, error) {
 		source := r.URL.Query().Get("source")
 		var items []map[string]any

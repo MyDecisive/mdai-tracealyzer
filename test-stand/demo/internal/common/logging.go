@@ -6,50 +6,108 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	ddtrace "gopkg.in/DataDog/dd-trace-go.v1/ddtrace"
 	ddtracer "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 )
 
-type Logger struct {
-	service string
-	base    *log.Logger
+type Verbosity int
+
+const (
+	VerbosityModest Verbosity = iota
+	VerbosityHeavy
+)
+
+func VerbosityFromEnv() Verbosity {
+	switch strings.ToLower(os.Getenv("DEMO_LOG_VERBOSITY")) {
+	case "heavy":
+		return VerbosityHeavy
+	default:
+		return VerbosityModest
+	}
 }
 
-func NewLogger(service string) *Logger {
+const (
+	levelDebug = "DEBUG"
+	levelInfo  = "INFO"
+	levelWarn  = "WARN"
+	levelError = "ERROR"
+)
+
+type Logger struct {
+	service   string
+	base      *log.Logger
+	verbosity Verbosity
+}
+
+func NewLogger(service string, verbosity Verbosity) *Logger {
 	return &Logger{
-		service: service,
-		base:    log.New(os.Stdout, "", 0),
+		service:   service,
+		base:      log.New(os.Stdout, "", 0),
+		verbosity: verbosity,
 	}
+}
+
+func (l *Logger) Debug(ctx context.Context, message string, fields map[string]any) {
+	if l.verbosity < VerbosityHeavy {
+		return
+	}
+	l.emit(ctx, levelDebug, message, fields)
 }
 
 func (l *Logger) Info(ctx context.Context, message string, fields map[string]any) {
+	l.emit(ctx, levelInfo, message, fields)
+}
+
+func (l *Logger) Warn(ctx context.Context, message string, fields map[string]any) {
+	l.emit(ctx, levelWarn, message, fields)
+}
+
+func (l *Logger) Error(ctx context.Context, message string, fields map[string]any) {
+	l.emit(ctx, levelError, message, fields)
+}
+
+func (l *Logger) emit(ctx context.Context, level, message string, fields map[string]any) {
+	traceID, spanID := traceFields(ctx)
 	entry := map[string]any{
 		"timestamp":   time.Now().UTC().Format(time.RFC3339Nano),
-		"level":       "INFO",
+		"level":       level,
 		"message":     message,
 		"service":     l.service,
-		"dd.trace_id": "0",
-		"dd.span_id":  "0",
+		"dd.trace_id": traceID,
+		"dd.span_id":  spanID,
 	}
-
-	traceID, spanID := traceFields(ctx)
-	entry["dd.trace_id"] = traceID
-	entry["dd.span_id"] = spanID
-
 	for key, value := range fields {
 		if value != nil {
 			entry[key] = value
 		}
 	}
-
 	payload, err := json.Marshal(entry)
 	if err != nil {
 		l.base.Printf(`{"timestamp":"%s","level":"ERROR","service":"%s","message":"failed to marshal log","marshal_error":%q}`, time.Now().UTC().Format(time.RFC3339Nano), l.service, err.Error())
 		return
 	}
 	l.base.Println(string(payload))
+}
+
+func StartHeartbeat(logger *Logger) {
+	if logger.verbosity < VerbosityHeavy {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		var seq int64
+		for range ticker.C {
+			seq++
+			logger.Debug(context.Background(), "heartbeat", map[string]any{
+				"event": "heartbeat",
+				"seq":   seq,
+			})
+		}
+	}()
 }
 
 func traceFields(ctx context.Context) (string, string) {

@@ -1,0 +1,395 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traced-service-env
+  labels:
+    app.kubernetes.io/part-of: test-stand-demo
+data:
+  DD_ENV: local
+  DD_LOGS_INJECTION: "true"
+  DD_TRACE_AGENT_URL: http://datadog-agent:8126
+  DD_TRACE_SAMPLE_RATE: "1.0"
+  DD_TRACE_RATE_LIMIT: "1000000"
+  DD_TRACE_128_BIT_TRACEID_GENERATION_ENABLED: "true"
+  DD_VERSION: 1.0.0
+  DEMO_LOG_VERBOSITY: modest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-api
+  labels:
+    app.kubernetes.io/name: catalog-api
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: catalog-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: catalog-api
+        app.kubernetes.io/part-of: test-stand-demo
+    spec:
+      containers:
+        - name: demo-svc
+          image: test-stand-demo-svc:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: traced-service-env
+          env:
+            - name: DEMO_ROLE
+              value: catalog
+            - name: DD_SERVICE
+              value: catalog-api
+            - name: PORT
+              value: "8080"
+            - name: POSTGRES_DSN
+              value: postgres://demo:demo@postgres:5432/demo
+            - name: PAYMENTS_URL
+              value: http://payments-api:8080
+          ports:
+            - containerPort: 8080
+              name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-api
+  labels:
+    app.kubernetes.io/name: catalog-api
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  selector:
+    app.kubernetes.io/name: catalog-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  labels:
+    app.kubernetes.io/name: payments-api
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payments-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: payments-api
+        app.kubernetes.io/part-of: test-stand-demo
+    spec:
+      containers:
+        - name: demo-svc
+          image: test-stand-demo-svc:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: traced-service-env
+          env:
+            - name: DEMO_ROLE
+              value: payments
+            - name: DD_SERVICE
+              value: payments-api
+            - name: PORT
+              value: "8080"
+            - name: GATEWAY_URL
+              value: http://gateway-api:8080
+          ports:
+            - containerPort: 8080
+              name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-api
+  labels:
+    app.kubernetes.io/name: payments-api
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  selector:
+    app.kubernetes.io/name: payments-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-http-api
+  labels:
+    app.kubernetes.io/name: inventory-http-api
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: inventory-http-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: inventory-http-api
+        app.kubernetes.io/part-of: test-stand-demo
+    spec:
+      containers:
+        - name: demo-svc
+          image: test-stand-demo-svc:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: traced-service-env
+          env:
+            - name: DEMO_ROLE
+              value: inventory-http
+            - name: DD_SERVICE
+              value: inventory-http-api
+            - name: PORT
+              value: "8080"
+            - name: CATALOG_URL
+              value: http://catalog-api:8080
+          ports:
+            - containerPort: 8080
+              name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-http-api
+  labels:
+    app.kubernetes.io/name: inventory-http-api
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  selector:
+    app.kubernetes.io/name: inventory-http-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-grpc-service
+  labels:
+    app.kubernetes.io/name: inventory-grpc-service
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: inventory-grpc-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: inventory-grpc-service
+        app.kubernetes.io/part-of: test-stand-demo
+    spec:
+      containers:
+        - name: demo-svc
+          image: test-stand-demo-svc:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: traced-service-env
+          env:
+            - name: DEMO_ROLE
+              value: inventory-grpc
+            - name: DD_SERVICE
+              value: inventory-grpc-service
+            - name: GRPC_PORT
+              value: "50051"
+          ports:
+            - containerPort: 50051
+              name: grpc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-grpc-service
+  labels:
+    app.kubernetes.io/name: inventory-grpc-service
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  selector:
+    app.kubernetes.io/name: inventory-grpc-service
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-api
+  labels:
+    app.kubernetes.io/name: checkout-api
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: checkout-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: checkout-api
+        app.kubernetes.io/part-of: test-stand-demo
+    spec:
+      containers:
+        - name: demo-svc
+          image: test-stand-demo-svc:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: traced-service-env
+          env:
+            - name: DEMO_ROLE
+              value: checkout
+            - name: DD_SERVICE
+              value: checkout-api
+            - name: PORT
+              value: "8080"
+            - name: PAYMENTS_URL
+              value: http://payments-api:8080
+            - name: INVENTORY_HTTP_URL
+              value: http://inventory-http-api:8080
+            - name: INVENTORY_GRPC_TARGET
+              value: inventory-grpc-service:50051
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+            - name: KAFKA_TOPIC_JOINED
+              value: checkout-completed-joined
+            - name: KAFKA_TOPIC_DETACHED
+              value: checkout-completed-detached
+          ports:
+            - containerPort: 8080
+              name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout-api
+  labels:
+    app.kubernetes.io/name: checkout-api
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  selector:
+    app.kubernetes.io/name: checkout-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-api
+  labels:
+    app.kubernetes.io/name: gateway-api
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gateway-api
+        app.kubernetes.io/part-of: test-stand-demo
+    spec:
+      containers:
+        - name: demo-svc
+          image: test-stand-demo-svc:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: traced-service-env
+          env:
+            - name: DEMO_ROLE
+              value: gateway
+            - name: DD_SERVICE
+              value: gateway-api
+            - name: PORT
+              value: "8080"
+            - name: CATALOG_URL
+              value: http://catalog-api:8080
+            - name: CHECKOUT_URL
+              value: http://checkout-api:8080
+            - name: INVENTORY_HTTP_URL
+              value: http://inventory-http-api:8080
+            - name: INVENTORY_GRPC_TARGET
+              value: inventory-grpc-service:50051
+            - name: PAYMENTS_URL
+              value: http://payments-api:8080
+            - name: REDIS_ADDR
+              value: redis:6379
+          ports:
+            - containerPort: 8080
+              name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-api
+  labels:
+    app.kubernetes.io/name: gateway-api
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  selector:
+    app.kubernetes.io/name: gateway-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifier
+  labels:
+    app.kubernetes.io/name: notifier
+    app.kubernetes.io/part-of: test-stand-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: notifier
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: notifier
+        app.kubernetes.io/part-of: test-stand-demo
+    spec:
+      containers:
+        - name: demo-svc
+          image: test-stand-demo-svc:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: traced-service-env
+          env:
+            - name: DEMO_ROLE
+              value: notifier
+            - name: DD_SERVICE
+              value: notifier
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+            - name: KAFKA_TOPIC_JOINED
+              value: checkout-completed-joined
+            - name: KAFKA_TOPIC_DETACHED
+              value: checkout-completed-detached
+            - name: KAFKA_GROUP_ID
+              value: notifier
+            - name: CATALOG_URL
+              value: http://catalog-api:8080

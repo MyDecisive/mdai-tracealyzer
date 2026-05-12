@@ -53,7 +53,7 @@ func NewKafkaProducer(service, brokers, topic string) *KafkaProducer {
 	}
 }
 
-func (p *KafkaProducer) Publish(ctx context.Context, key string, payload any) error {
+func (p *KafkaProducer) Publish(ctx context.Context, logger *Logger, key string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -83,6 +83,12 @@ func (p *KafkaProducer) Publish(ctx context.Context, key string, payload any) er
 	}
 	if err := p.writer.WriteMessages(ctx, msg); err != nil {
 		span.SetTag(ext.Error, err)
+		logger.Error(ctx, "kafka publish failed", map[string]any{
+			"event": "kafka_publish_failed",
+			"topic": p.topic,
+			"key":   key,
+			"error": err.Error(),
+		})
 		return err
 	}
 	return nil
@@ -136,7 +142,7 @@ func (c *KafkaConsumer) Run(ctx context.Context, logger *Logger) error {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
 			}
-			logger.Info(ctx, "kafka fetch failed", map[string]any{
+			logger.Warn(ctx, "kafka fetch failed", map[string]any{
 				"event": "kafka_fetch_failed",
 				"topic": c.cfg.Topic,
 				"error": err.Error(),
@@ -148,12 +154,19 @@ func (c *KafkaConsumer) Run(ctx context.Context, logger *Logger) error {
 		c.handleMessage(ctx, logger, msg)
 
 		if err := c.reader.CommitMessages(ctx, msg); err != nil {
-			logger.Info(ctx, "kafka commit failed", map[string]any{
+			logger.Warn(ctx, "kafka commit failed", map[string]any{
 				"event": "kafka_commit_failed",
 				"topic": c.cfg.Topic,
 				"error": err.Error(),
 			})
+			continue
 		}
+		logger.Debug(ctx, "kafka offset committed", map[string]any{
+			"event":     "kafka_offset_committed",
+			"topic":     c.cfg.Topic,
+			"partition": msg.Partition,
+			"offset":    msg.Offset,
+		})
 	}
 }
 
@@ -186,7 +199,7 @@ func (c *KafkaConsumer) handleMessage(ctx context.Context, logger *Logger, msg k
 	payload := KafkaMessage{Key: string(msg.Key), Value: msg.Value, Headers: msg.Headers}
 	if err := c.cfg.Handler(spanCtx, payload); err != nil {
 		span.SetTag(ext.Error, err)
-		logger.Info(spanCtx, "kafka handler failed", map[string]any{
+		logger.Error(spanCtx, "kafka handler failed", map[string]any{
 			"event": "kafka_handler_failed",
 			"topic": c.cfg.Topic,
 			"error": err.Error(),

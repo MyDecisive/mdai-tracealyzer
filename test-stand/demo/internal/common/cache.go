@@ -12,15 +12,16 @@ import (
 type Redis struct {
 	client  *redis.Client
 	service string
+	logger  *Logger
 }
 
-func NewRedis(ctx context.Context, service, addr string) (*Redis, error) {
+func NewRedis(ctx context.Context, logger *Logger, service, addr string) (*Redis, error) {
 	client := redis.NewClient(&redis.Options{Addr: addr})
 	if err := client.Ping(ctx).Err(); err != nil {
 		_ = client.Close()
 		return nil, err
 	}
-	return &Redis{client: client, service: service}, nil
+	return &Redis{client: client, service: service, logger: logger}, nil
 }
 
 func (r *Redis) Close() error {
@@ -38,14 +39,28 @@ func (r *Redis) Get(ctx context.Context, key string) (string, bool, error) {
 	span.SetTag("db.operation", "GET")
 	defer span.Finish()
 
+	r.logger.Debug(ctx, "cache lookup", map[string]any{
+		"event":     "cache_lookup",
+		"operation": "GET",
+		"key":       key,
+	})
+
 	val, err := r.client.Get(ctx, key).Result()
 	if errors.Is(err, redis.Nil) {
+		r.logger.Debug(ctx, "cache miss", map[string]any{
+			"event": "cache_miss",
+			"key":   key,
+		})
 		return "", false, nil
 	}
 	if err != nil {
 		span.SetTag(ext.Error, err)
 		return "", false, err
 	}
+	r.logger.Debug(ctx, "cache hit", map[string]any{
+		"event": "cache_hit",
+		"key":   key,
+	})
 	return val, true, nil
 }
 
@@ -59,6 +74,12 @@ func (r *Redis) Set(ctx context.Context, key, value string) error {
 	span.SetTag("db.statement", "SET "+key)
 	span.SetTag("db.operation", "SET")
 	defer span.Finish()
+
+	r.logger.Debug(ctx, "cache write", map[string]any{
+		"event":     "cache_write",
+		"operation": "SET",
+		"key":       key,
+	})
 
 	if err := r.client.Set(ctx, key, value, 0).Err(); err != nil {
 		span.SetTag(ext.Error, err)

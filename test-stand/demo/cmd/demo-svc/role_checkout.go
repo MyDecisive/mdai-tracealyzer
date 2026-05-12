@@ -103,6 +103,12 @@ func runCheckout(service string, logger *common.Logger) error {
 		}
 
 		if payment["status"] == "declined" {
+			logger.Warn(ctx, "payment declined", map[string]any{
+				"event":      "payment_declined",
+				"request_id": meta.RequestID,
+				"scenario":   meta.Scenario,
+				"transport":  transport,
+			})
 			response["status"] = "declined"
 			if transport == "grpc" {
 				grpcCtx := common.WithRequestMetadata(ctx, meta.RequestID, meta.Scenario)
@@ -147,7 +153,7 @@ func runCheckout(service string, logger *common.Logger) error {
 				"sku":        "coffee",
 				"quantity":   1,
 			}
-			if err := producer.Publish(ctx, meta.RequestID, event); err != nil {
+			if err := producer.Publish(ctx, logger, meta.RequestID, event); err != nil {
 				return nil, err
 			}
 			response["notified"] = notify
@@ -156,18 +162,7 @@ func runCheckout(service string, logger *common.Logger) error {
 		return response, nil
 	})
 
-	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/deep", func(ctx context.Context, r *http.Request, meta common.RequestMeta) (any, error) {
-		inventory, err := common.JSONRequest(ctx, httpClient, logger, http.MethodGet, inventoryHTTPURL+"/deep-check", "checkout.deep_inventory_check", meta, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{
-			"request_id": meta.RequestID,
-			"scenario":   meta.Scenario,
-			"route":      "/deep",
-			"inventory":  inventory,
-		}, nil
-	})
+	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/deep", deepForwardHandler(httpClient, logger, inventoryHTTPURL, "checkout.deep_chain"))
 
 	addr := ":" + common.Getenv("PORT", "8080")
 	return http.ListenAndServe(addr, mux)

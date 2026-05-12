@@ -57,7 +57,7 @@ func (s *inventoryServer) ReserveItems(ctx context.Context, req *pb.InventoryReq
 	})
 
 	if scenario == "checkout-grpc-error" {
-		s.logger.Info(ctx, "request failed", map[string]any{
+		s.logger.Error(ctx, "request failed", map[string]any{
 			"event":       "request_failed",
 			"request_id":  requestID,
 			"scenario":    scenario,

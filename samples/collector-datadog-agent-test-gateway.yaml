@@ -25,11 +25,6 @@ spec:
       datadog:
         endpoint: "0.0.0.0:8126"
 
-    processors:
-      batch:
-        send_batch_size: 1000
-        timeout: 10s
-
     exporters:
       otlp_grpc/tracealyzer:
         endpoint: ${env:OTLP_GRPC_ENDPOINT}
@@ -37,11 +32,13 @@ spec:
           insecure: true
 
       debug:
-        verbosity: detailed
+        verbosity: basic
 
     service:
       pipelines:
         traces/tracealyzer:
           receivers: [datadog]
-#          processors: [batch]
-          exporters: [otlp_grpc/tracealyzer,debug]
+          exporters: [otlp_grpc/tracealyzer, debug]
+        logs/debug:
+          receivers: [datadog]
+          exporters: [debug]
