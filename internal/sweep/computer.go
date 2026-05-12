@@ -15,7 +15,7 @@ type TopologyComputer struct{}
 
 var _ Computer = TopologyComputer{}
 
-func (TopologyComputer) Compute(traceID [16]byte, _ string, records map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
+func (TopologyComputer) Compute(traceID [16]byte, records map[string]buffer.SpanRecord) ([]topology.RootMetrics, int32, error) {
 	spans := make(map[[8]byte]topology.Span, len(records))
 	for _, r := range records {
 		spans[r.SpanID] = topology.Span{

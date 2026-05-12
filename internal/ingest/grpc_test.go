@@ -157,7 +157,7 @@ func TestGRPCServer_Export_ReportsRejectedSpans(t *testing.T) {
 	}
 }
 
-func TestGRPCServer_Shutdown_StopsServer(t *testing.T) {
+func TestGRPCServer_Shutdown_HaltsServer(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
@@ -174,9 +174,9 @@ func TestGRPCServer_Shutdown_StopsServer(t *testing.T) {
 		serveErr <- server.Serve(ln)
 	}()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	if err := server.Shutdown(stopCtx); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
 	select {
@@ -189,35 +189,48 @@ func TestGRPCServer_Shutdown_StopsServer(t *testing.T) {
 	}
 }
 
-func TestGRPCServer_StartReturnsOnCtxCancelStopHalts(t *testing.T) {
+func TestGRPCServer_StartServesAndShutdownHalts(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
 	metrics := ingest.NewMetrics(prometheus.NewRegistry())
 	server := ingest.NewGRPCServer(rec, "127.0.0.1:0", metrics, zap.NewNop())
 
-	ctx, cancel := context.WithCancel(t.Context())
-	startErr := make(chan error, 1)
-	go func() { startErr <- server.Start(ctx) }()
+	if err := server.Start(t.Context(), noopHost{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 
-	time.Sleep(50 * time.Millisecond)
+	addr := server.Addr()
+	if addr == nil {
+		t.Fatal("Addr() returned nil after Start")
+	}
+	conn, err := grpc.NewClient(addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	client := coltracepb.NewTraceServiceClient(conn)
 
-	cancel()
-	select {
-	case err := <-startErr:
-		if err != nil {
-			t.Fatalf("Start: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Start did not return on ctx cancel")
+	if _, err := client.Export(t.Context(), &coltracepb.ExportTraceServiceRequest{}); err != nil {
+		t.Fatalf("Export before Shutdown: %v", err)
 	}
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stopCancel()
-	if err := server.Stop(stopCtx); err != nil {
-		t.Fatalf("Stop: %v", err)
+	if err := server.Shutdown(stopCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	postCtx, postCancel := context.WithTimeout(context.Background(), time.Second)
+	defer postCancel()
+	if _, err := client.Export(postCtx, &coltracepb.ExportTraceServiceRequest{}); err == nil {
+		t.Error("Export succeeded after Shutdown; expected failure")
 	}
 }
+
+type noopHost struct{}
+
+func (noopHost) Fatal(string, error) {}
 
 // --- test helpers ---
 

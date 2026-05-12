@@ -2,19 +2,15 @@ package run
 
 import "context"
 
-// Component is a long-lived subsystem managed by Supervisor.
-//
-// Start blocks until the component fails or ctx is cancelled. Returning nil
-// means clean exit on cancellation; returning a non-nil error is fatal and
-// triggers shutdown of the entire supervisor. A Start that completes its
-// work and returns nil before ctx cancels (a fire-and-exit probe) is valid;
-// the supervisor keeps running for the remaining components.
-//
-// Stop is invoked by the supervisor after Start has unblocked, in reverse
-// registration order, under a fresh context bounded by the shutdown grace.
-// Stop must be safe to call when Start has already cleaned up on its own.
+// Component lifecycle. Start launches background work that does not depend
+// on the Start ctx and returns; post-Start failures escalate via host.Fatal.
+// Shutdown owns the component-specific stop mechanism — context cancel,
+// http.Server.Shutdown, grpc.Server.GracefulStop, or equivalent — then waits
+// for the background work to exit. Shutdown is idempotent and safe to call
+// without a prior Start. Shutdown honours ctx unless the implementation owns
+// destructive in-flight work whose interruption would lose data.
 type Component interface {
 	Name() string
-	Start(ctx context.Context) error
-	Stop(ctx context.Context) error
+	Start(ctx context.Context, host Host) error
+	Shutdown(ctx context.Context) error
 }

@@ -4,19 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
 	"github.com/mydecisive/mdai-tracealyzer/internal/greptimecfg"
+	"github.com/mydecisive/mdai-tracealyzer/internal/run"
 	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
+var _ run.Component = (*Emitter)(nil)
+
 var (
-	// ErrClosed is returned when Emit is called after Stop.
+	// ErrClosed is returned when Emit is called after Shutdown.
 	ErrClosed = errors.New("emitter closed")
 	// ErrQueueFull is returned when rows cannot be accepted because the queue is full.
 	ErrQueueFull = errors.New("emitter queue full")
@@ -56,8 +59,7 @@ type metrics struct {
 }
 
 // Emitter accepts finalized topology rows and ships them to GreptimeDB
-// asynchronously. It is a run.Component: Start runs the flush loop, Stop
-// drains pending rows and closes the underlying writer.
+// asynchronously.
 type Emitter struct {
 	cfg     config.Emitter
 	logger  *zap.Logger
@@ -65,9 +67,14 @@ type Emitter struct {
 	writer  writer
 	now     func() time.Time
 
-	queue   chan []topology.RootMetrics
-	pending []topology.RootMetrics
-	closed  atomic.Bool
+	queue        chan []topology.RootMetrics
+	pending      []topology.RootMetrics
+	closedMu     sync.RWMutex
+	closed       bool
+	started      bool
+	stopCh       chan struct{}
+	doneCh       chan struct{}
+	cancelWrites context.CancelFunc
 }
 
 func New(cfg config.Emitter, logger *zap.Logger, reg prometheus.Registerer) (*Emitter, error) {
@@ -109,6 +116,8 @@ func newWithWriter(
 		writer:  w,
 		now:     now,
 		queue:   make(chan []topology.RootMetrics, cfg.QueueCapacity),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
 	}
 }
 
@@ -118,22 +127,107 @@ func (e *Emitter) HealthCheck(ctx context.Context) error {
 	return e.writer.HealthCheck(ctx)
 }
 
-// Start runs the flush loop until ctx cancels. Writes use a detached
-// context.Background() parent so a SIGTERM does not abort an in-flight
-// flush mid-call; Stop performs the final drain under the supervisor's
-// shutdown deadline.
+// Start roots writeCtx on Background so SIGTERM doesn't abort mid-flush;
+// Shutdown calls cancelWrites to abort an in-flight Write past the grace.
 //
-//nolint:contextcheck // see doc — writes use Background to survive parent cancel.
-func (e *Emitter) Start(ctx context.Context) error {
+//nolint:contextcheck
+func (e *Emitter) Start(_ context.Context, _ run.Host) error {
+	writeCtx, cancelWrites := context.WithCancel(context.Background())
+
+	e.closedMu.Lock()
+	e.started = true
+	e.cancelWrites = cancelWrites
+	e.closedMu.Unlock()
+
+	go e.run(writeCtx, cancelWrites)
+	return nil
+}
+
+func (e *Emitter) Shutdown(ctx context.Context) error {
+	e.closedMu.Lock()
+	if e.closed {
+		e.closedMu.Unlock()
+		return nil
+	}
+	e.closed = true
+	started := e.started
+	e.closedMu.Unlock()
+
+	if !started {
+		if err := e.writer.Close(); err != nil {
+			return fmt.Errorf("close writer: %w", err)
+		}
+		return nil
+	}
+
+	close(e.stopCh)
+
+	select {
+	case <-e.doneCh:
+	case <-ctx.Done():
+		e.cancelWrites()
+		<-e.doneCh
+	}
+
+	e.pending = e.drainQueue(e.pending)
+
+	var errs []error
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if len(e.pending) > 0 {
+			e.recordDroppedRows("shutdown grace expired", e.pending, ctxErr)
+			e.pending = nil
+		}
+		errs = append(errs, ctxErr)
+	} else if err := e.flushAll(ctx, &e.pending); err != nil {
+		errs = append(errs, fmt.Errorf("flush during shutdown: %w", err))
+	}
+
+	if err := e.writer.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("close writer: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+// Emit enqueues rows non-blockingly. Returns ErrClosed after Shutdown and
+// ErrQueueFull when the queue is at capacity.
+func (e *Emitter) Emit(_ context.Context, rows []topology.RootMetrics) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	// TODO: remove cloning if we can be sure that:
+	//  After calling Emit(ctx, rows), the caller transfers ownership of the
+	//  slice contents to the emitter until the emitter has processed them.
+	//  The caller must not mutate the slice elements or reuse the slice
+	//  backing array.
+	cloned := cloneRows(rows)
+
+	e.closedMu.RLock()
+	defer e.closedMu.RUnlock()
+	if e.closed {
+		e.recordDroppedRows("emitter closed", cloned, ErrClosed)
+		return ErrClosed
+	}
+	select {
+	case e.queue <- cloned:
+		return nil
+	default:
+		e.recordDroppedRows("queue full", cloned, ErrQueueFull)
+		return ErrQueueFull
+	}
+}
+
+func (e *Emitter) run(writeCtx context.Context, cancelWrites context.CancelFunc) {
+	defer close(e.doneCh)
+	defer cancelWrites()
+
 	ticker := time.NewTicker(e.cfg.FlushInterval.Duration())
 	defer ticker.Stop()
 
-	writeCtx := context.Background()
-
 	for {
 		select {
-		case <-ctx.Done():
-			return nil
+		case <-e.stopCh:
+			return
 		case rows := <-e.queue:
 			e.pending = append(e.pending, rows...)
 			if err := e.flushReady(writeCtx, &e.pending); err != nil {
@@ -144,50 +238,6 @@ func (e *Emitter) Start(ctx context.Context) error {
 				e.logger.Error("flush emitter batch", zap.Error(err))
 			}
 		}
-	}
-}
-
-// Stop is idempotent.
-func (e *Emitter) Stop(ctx context.Context) error {
-	if !e.closed.CompareAndSwap(false, true) {
-		return nil
-	}
-
-	e.pending = e.drainQueue(e.pending)
-
-	var errs []error
-	if err := e.flushAll(ctx, &e.pending); err != nil {
-		errs = append(errs, fmt.Errorf("flush during shutdown: %w", err))
-	}
-	if err := e.writer.Close(); err != nil {
-		errs = append(errs, fmt.Errorf("close writer: %w", err))
-	}
-	return errors.Join(errs...)
-}
-
-// Emit enqueues rows non-blockingly. Returns ErrClosed after Stop and
-// ErrQueueFull when the queue is at capacity.
-func (e *Emitter) Emit(_ context.Context, rows []topology.RootMetrics) error {
-	if len(rows) == 0 {
-		return nil
-	}
-	if e.closed.Load() {
-		return ErrClosed
-	}
-
-	// TODO: remove cloning if we can be sure that:
-	//  After calling Emit(ctx, rows), the caller transfers ownership of the
-	//  slice contents to the emitter until the emitter has processed them.
-	//  The caller must not mutate the slice elements or reuse the slice
-	//  backing array.
-	cloned := cloneRows(rows)
-
-	select {
-	case e.queue <- cloned:
-		return nil
-	default:
-		e.recordDroppedRows("queue full", cloned, ErrQueueFull)
-		return ErrQueueFull
 	}
 }
 
@@ -241,12 +291,13 @@ func (e *Emitter) writeWithRetry(parent context.Context, batch []topology.RootMe
 	eb.RandomizationFactor = 0
 	eb.Multiplier = 2
 
+	ts := e.now()
 	attempt := 0
 	var lastWriteErr error
 	_, err := backoff.Retry(parent, func() (struct{}, error) {
 		ctx, cancel := context.WithTimeout(parent, e.cfg.Timeout.Duration())
 		defer cancel()
-		werr := e.writer.Write(ctx, makeWriteBatch(batch, e.now()))
+		werr := e.writer.Write(ctx, makeWriteBatch(batch, ts))
 		if werr == nil {
 			e.logger.Debug("emit: batch written",
 				zap.String("table", greptimecfg.SourceTableName),

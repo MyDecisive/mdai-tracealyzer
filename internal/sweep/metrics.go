@@ -15,15 +15,16 @@ const (
 
 // Metrics is nil-safe; methods no-op on a nil receiver.
 type Metrics struct {
-	sweeps          *prometheus.CounterVec
-	trigger         *prometheus.CounterVec
-	computeSkipped  *prometheus.CounterVec
-	finalized       prometheus.Counter
-	drainErrors     prometheus.Counter
-	computeErrors   prometheus.Counter
-	orphanSpans     prometheus.Counter
-	orphanBytes     prometheus.Counter
-	computeDuration prometheus.Histogram
+	sweeps           *prometheus.CounterVec
+	trigger          *prometheus.CounterVec
+	computeSkipped   *prometheus.CounterVec
+	finalized        prometheus.Counter
+	drainErrors      prometheus.Counter
+	computeErrors    prometheus.Counter
+	orphanSpans      prometheus.Counter
+	orphanBytes      prometheus.Counter
+	rootIDCollisions prometheus.Counter
+	computeDuration  prometheus.Histogram
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -62,22 +63,27 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		Name: "topology_orphan_bytes_total",
 		Help: "Apportioned OTLP byte share of spans dropped at reconstruction. Surfaces under-counts in per-root span_bytes_total at the org level.",
 	})
+	rootIDCollisions := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "topology_root_id_collisions_total",
+		Help: "Rows merged away by the source-table primary key (root_id, trace_id) because authentic roots in one trace shared a RootID.",
+	})
 	computeDuration := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name: "topology_compute_duration_seconds",
 		Help: "Per-trace topology computation time, measured around a single Compute call.",
 	})
-	reg.MustRegister(sweeps, finalized, trigger, drain, compute, computeSkipped, orphan, orphanBytes, computeDuration)
+	reg.MustRegister(sweeps, finalized, trigger, drain, compute, computeSkipped, orphan, orphanBytes, rootIDCollisions, computeDuration)
 
 	return &Metrics{
-		sweeps:          sweeps,
-		trigger:         trigger,
-		computeSkipped:  computeSkipped,
-		finalized:       finalized,
-		drainErrors:     drain,
-		computeErrors:   compute,
-		orphanSpans:     orphan,
-		orphanBytes:     orphanBytes,
-		computeDuration: computeDuration,
+		sweeps:           sweeps,
+		trigger:          trigger,
+		computeSkipped:   computeSkipped,
+		finalized:        finalized,
+		drainErrors:      drain,
+		computeErrors:    compute,
+		orphanSpans:      orphan,
+		orphanBytes:      orphanBytes,
+		rootIDCollisions: rootIDCollisions,
+		computeDuration:  computeDuration,
 	}
 }
 
@@ -129,6 +135,13 @@ func (m *Metrics) addOrphanBytes(n int64) {
 		return
 	}
 	m.orphanBytes.Add(float64(n))
+}
+
+func (m *Metrics) addRootIDCollisions(n int) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.rootIDCollisions.Add(float64(n))
 }
 
 func (m *Metrics) observeComputeDuration(d time.Duration) {

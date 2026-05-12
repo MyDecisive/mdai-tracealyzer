@@ -4,97 +4,144 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 )
 
-// Supervisor orchestrates a fixed set of Components: it starts them
-// concurrently, waits for the first failure or for ctx to cancel, then
-// stops every component in reverse registration order under a single
-// shutdown deadline. Stop runs even when a component's Start returned an
-// error so resources are released regardless of the failure path.
+// ErrRunAlreadyCalled is returned by Supervisor.Run if it has already been
+// invoked. Run is one-shot: fatalCh and component state are not safe to
+// reuse across invocations.
+var ErrRunAlreadyCalled = errors.New("supervisor: Run already called")
+
+type fatalSignal struct {
+	component string
+	err       error
+}
+
 type Supervisor struct {
 	components []Component
 	grace      time.Duration
 	logger     *zap.Logger
-	preStop    func()
+	onShutdown func()
+	fatalCh    chan fatalSignal
+	overflowMu sync.Mutex
+	overflow   []error
+	runStarted atomic.Bool
 }
 
 func New(grace time.Duration, logger *zap.Logger, components ...Component) *Supervisor {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	bufSize := max(len(components), 1)
 	return &Supervisor{
 		components: components,
 		grace:      grace,
 		logger:     logger,
-		preStop:    func() {},
+		onShutdown: func() {},
+		fatalCh:    make(chan fatalSignal, bufSize),
 	}
 }
 
-// OnShutdown registers a hook invoked once, after Start has unblocked and
-// before any Stop call.
 func (s *Supervisor) OnShutdown(fn func()) {
-	s.preStop = fn
+	s.onShutdown = fn
+}
+
+func (s *Supervisor) Fatal(component string, err error) {
+	select {
+	case s.fatalCh <- fatalSignal{component: component, err: err}:
+	default:
+		s.overflowMu.Lock()
+		s.overflow = append(s.overflow, fmt.Errorf("%s: %w", component, err))
+		s.overflowMu.Unlock()
+		s.logger.Warn("supervisor: fatal channel full, dropped into overflow",
+			zap.String("component", component), zap.Error(err))
+	}
 }
 
 func (s *Supervisor) Run(ctx context.Context) error {
-	g, gctx := errgroup.WithContext(ctx)
+	if !s.runStarted.CompareAndSwap(false, true) {
+		return ErrRunAlreadyCalled
+	}
+
+	var triggerErr error
+
 	for _, c := range s.components {
 		s.logger.Info("supervisor: starting component", zap.String("name", c.Name()))
-		g.Go(func() error {
-			if err := c.Start(gctx); err != nil {
-				return fmt.Errorf("%s: %w", c.Name(), err)
-			}
-			return nil
-		})
-	}
-
-	waited := make(chan error, 1)
-	go func() { waited <- g.Wait() }()
-
-	var runErr error
-	select {
-	case runErr = <-waited:
-	case <-ctx.Done():
-		select {
-		case runErr = <-waited:
-		case <-time.After(s.grace):
-			s.logger.Warn("supervisor: components did not exit within grace; proceeding to shutdown",
-				zap.Duration("grace", s.grace))
-			runErr = ctx.Err()
+		if err := c.Start(ctx, s); err != nil {
+			triggerErr = fmt.Errorf("start %s: %w", c.Name(), err)
+			s.logger.Error("supervisor: start failed",
+				zap.String("name", c.Name()), zap.Error(err))
+			break
 		}
 	}
-	if runErr != nil {
-		s.logger.Error("supervisor: component exited with error", zap.Error(runErr))
+
+	if triggerErr == nil {
+		select {
+		case <-ctx.Done():
+			s.logger.Info("supervisor: shutdown trigger", zap.String("trigger", "ctx_cancel"))
+		case f := <-s.fatalCh:
+			triggerErr = fmt.Errorf("%s: %w", f.component, f.err)
+			s.logger.Error("supervisor: shutdown trigger",
+				zap.String("trigger", "fatal"),
+				zap.String("name", f.component),
+				zap.Error(f.err))
+		}
 	} else {
-		s.logger.Info("supervisor: all components exited cleanly")
+		s.logger.Info("supervisor: shutdown trigger", zap.String("trigger", "start_error"))
 	}
 
-	s.preStop()
+	s.onShutdown()
 
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.grace)
 	defer cancel()
 
-	stopErrs := s.stopAll(stopCtx)
-	if len(stopErrs) > 0 {
-		return errors.Join(append([]error{runErr}, stopErrs...)...)
+	stopErrs := s.shutdownComponents(stopCtx)
+
+	if triggerErr == nil && len(stopErrs) == 0 {
+		return nil
 	}
-	return runErr
+	parts := make([]error, 0, 1+len(stopErrs))
+	if triggerErr != nil {
+		parts = append(parts, triggerErr)
+	}
+	parts = append(parts, stopErrs...)
+	return errors.Join(parts...)
 }
 
-func (s *Supervisor) stopAll(ctx context.Context) []error {
-	var errs []error
-	for i := len(s.components) - 1; i >= 0; i-- {
-		c := s.components[i]
-		s.logger.Info("supervisor: stopping component", zap.String("name", c.Name()))
-		if err := c.Stop(ctx); err != nil {
-			s.logger.Warn("supervisor: stop failed",
-				zap.String("name", c.Name()), zap.Error(err))
-			errs = append(errs, fmt.Errorf("stop %s: %w", c.Name(), err))
+func (s *Supervisor) shutdownComponents(stopCtx context.Context) []error {
+	var stopErrs []error
+	for _, c := range slices.Backward(s.components) {
+		s.logger.Info("supervisor: shutting down component", zap.String("name", c.Name()))
+		started := time.Now()
+		err := c.Shutdown(stopCtx)
+		dur := time.Since(started)
+		if err != nil {
+			s.logger.Warn("supervisor: shutdown failed",
+				zap.String("name", c.Name()),
+				zap.Duration("duration", dur),
+				zap.Error(err))
+			stopErrs = append(stopErrs, fmt.Errorf("shutdown %s: %w", c.Name(), err))
+			continue
+		}
+		s.logger.Info("supervisor: shutdown complete",
+			zap.String("name", c.Name()), zap.Duration("duration", dur))
+	}
+	for drained := false; !drained; {
+		select {
+		case f := <-s.fatalCh:
+			stopErrs = append(stopErrs, fmt.Errorf("%s: %w", f.component, f.err))
+		default:
+			drained = true
 		}
 	}
-	return errs
+	s.overflowMu.Lock()
+	stopErrs = append(stopErrs, s.overflow...)
+	s.overflow = nil
+	s.overflowMu.Unlock()
+	return stopErrs
 }

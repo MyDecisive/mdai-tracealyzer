@@ -17,6 +17,8 @@ import (
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"go.uber.org/zap"
+	spb "google.golang.org/genproto/googleapis/rpc/status"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -278,6 +280,55 @@ func TestHTTPServer_ReportsRejectedSpans(t *testing.T) {
 	}
 }
 
+// TestHTTPServer_MixedRejectionsReturnsUnavailable mirrors the gRPC
+// policy lock-in: any transient rejection in a batch — even mixed with
+// permanent ones — returns 503 so the client retries the whole batch
+// and recovers the transient rows.
+func TestHTTPServer_MixedRejectionsReturnsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	rec := &fakeRecorder{
+		rejectFn: func(r buffer.SpanRecord) error {
+			if r.SpanID == rootSpanID {
+				return buffer.ErrInvalidSpan
+			}
+			return buffer.ErrBufferFull
+		},
+	}
+	server := ingest.NewHTTPServer(rec, "", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
+	url, cleanup := startHTTP(t, server)
+	t.Cleanup(cleanup)
+
+	body := mustMarshal(t, &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{
+			resourceSpans("svc", []*tracepb.Span{
+				rootSpan(traceIDAllBytes, rootSpanID, "r",
+					tracepb.Span_SPAN_KIND_SERVER, tracepb.Status_STATUS_CODE_OK),
+				childSpan(traceIDAllBytes, childSpanID, rootSpanID, "c",
+					tracepb.Span_SPAN_KIND_INTERNAL, tracepb.Status_STATUS_CODE_OK),
+			}),
+		},
+	})
+	resp := doPost(t, url, "application/x-protobuf", body)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d (want 503), body = %q", resp.StatusCode, respBody)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/x-protobuf" {
+		t.Errorf("Content-Type = %q, want application/x-protobuf", ct)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	st := &spb.Status{}
+	if err := proto.Unmarshal(respBody, st); err != nil {
+		t.Fatalf("decode google.rpc.Status body: %v", err)
+	}
+	if got, want := st.GetCode(), int32(codes.Unavailable); got != want {
+		t.Errorf("Status.Code = %d, want %d (Unavailable)", got, want)
+	}
+}
+
 func TestHTTPServer_ReportsClassifiedErrorMessage(t *testing.T) {
 	t.Parallel()
 
@@ -287,8 +338,6 @@ func TestHTTPServer_ReportsClassifiedErrorMessage(t *testing.T) {
 		wantMsg string
 	}{
 		{"invalid_span", buffer.ErrInvalidSpan, buffer.ErrInvalidSpan.Error()},
-		{"buffer_full", buffer.ErrBufferFull, buffer.ErrBufferFull.Error()},
-		{"backend_unavailable", buffer.ErrBackendUnavailable, buffer.ErrBackendUnavailable.Error()},
 		{"unclassified_fallback", errors.New("some driver-internal thing"), "buffer rejected spans"},
 	}
 	for _, tc := range cases {
@@ -354,35 +403,52 @@ func TestHTTPServer_CountsMalformedSpansAsReceived(t *testing.T) {
 	}
 }
 
-func TestHTTPServer_StartReturnsOnCtxCancelStopHalts(t *testing.T) {
+func TestHTTPServer_StartServesAndShutdownHalts(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeRecorder{}
 	server := ingest.NewHTTPServer(rec, "127.0.0.1:0", ingest.NewMetrics(prometheus.NewRegistry()), zap.NewNop())
 
-	ctx, cancel := context.WithCancel(t.Context())
-	startErr := make(chan error, 1)
-	go func() { startErr <- server.Start(ctx) }()
+	if err := server.Start(t.Context(), noopHost{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 
-	// Give Start a moment to bind. We don't need a stronger signal because
-	// the test only asserts Start returns on cancel; bind failure would
-	// fail the test below regardless.
-	time.Sleep(50 * time.Millisecond)
+	addr := server.Addr()
+	if addr == nil {
+		t.Fatal("Addr() returned nil after Start")
+	}
+	url := "http://" + addr.String() + "/v1/traces"
 
-	cancel()
-	select {
-	case err := <-startErr:
-		if err != nil {
-			t.Fatalf("Start: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Start did not return on ctx cancel")
+	body, err := proto.Marshal(&coltracepb.ExportTraceServiceRequest{})
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	post := func(ctx context.Context) (*http.Response, error) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-protobuf")
+		return http.DefaultClient.Do(req)
+	}
+
+	resp, err := post(t.Context())
+	if err != nil {
+		t.Fatalf("POST before Shutdown: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST before Shutdown: status %d, want 200", resp.StatusCode)
 	}
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stopCancel()
-	if err := server.Stop(stopCtx); err != nil {
-		t.Fatalf("Stop: %v", err)
+	if err := server.Shutdown(stopCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	postCtx, postCancel := context.WithTimeout(context.Background(), time.Second)
+	defer postCancel()
+	if resp, err := post(postCtx); err == nil {
+		_ = resp.Body.Close()
+		t.Error("POST succeeded after Shutdown; expected connection failure")
 	}
 }
 

@@ -5,25 +5,31 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/run"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	_ "google.golang.org/grpc/encoding/gzip" // Registers the gzip codec so gRPC accepts gzipped OTLP; OTel SDKs default to gzip.
+	"google.golang.org/grpc/status"
 )
 
 var _ run.Component = (*GRPCServer)(nil)
 
-// GRPCServer is the OTLP/gRPC ingest endpoint. It implements run.Component
-// when constructed with a non-empty addr (Start binds and serves). For
-// pre-bound listeners (used by tests), call Serve directly.
+// GRPCServer is the OTLP/gRPC ingest endpoint. Start binds addr and spawns
+// the serve goroutine. Tests with pre-bound listeners use Serve directly.
 type GRPCServer struct {
 	server *grpc.Server
 	addr   string
 	logger *zap.Logger
 
+	started   bool
+	listener  net.Listener
 	serveDone chan struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func NewGRPCServer(rec Recorder, addr string, metrics *Metrics, logger *zap.Logger) *GRPCServer {
@@ -38,11 +44,7 @@ func NewGRPCServer(rec Recorder, addr string, metrics *Metrics, logger *zap.Logg
 
 func (*GRPCServer) Name() string { return "otlp_grpc" }
 
-// Start binds addr and runs Serve until ctx cancels. It returns nil when
-// ctx cancels (Stop must be called separately to actually halt the
-// underlying gRPC server) and the wrapped error if Serve fails for any
-// reason other than a graceful stop.
-func (s *GRPCServer) Start(ctx context.Context) error {
+func (s *GRPCServer) Start(ctx context.Context, host run.Host) error {
 	if s.addr == "" {
 		return errors.New("GRPCServer.Start: addr is empty")
 	}
@@ -51,11 +53,31 @@ func (s *GRPCServer) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.addr, err)
 	}
-	return s.serveListener(ctx, ln)
+	s.listener = ln
+	s.serveDone = make(chan struct{})
+	s.started = true
+	go func() {
+		defer close(s.serveDone)
+		err := s.server.Serve(ln)
+		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			host.Fatal("otlp_grpc", err)
+		}
+	}()
+	return nil
 }
 
-// Serve runs the server on a pre-bound listener. The serve loop ends when
-// Shutdown is called; ctx is not consulted.
+// Addr returns the bound listener address after Start, or nil if Start was
+// never called or failed.
+func (s *GRPCServer) Addr() net.Addr {
+	if s.listener == nil {
+		return nil
+	}
+	return s.listener.Addr()
+}
+
+// Serve is a test-only entry point that runs the gRPC server on a pre-bound
+// listener. It bypasses Start (no listener bind, no host escalation). Tests
+// must still call Shutdown to halt the server. Production callers use Start.
 func (s *GRPCServer) Serve(ln net.Listener) error {
 	err := s.server.Serve(ln)
 	if errors.Is(err, grpc.ErrServerStopped) {
@@ -64,52 +86,25 @@ func (s *GRPCServer) Serve(ln net.Listener) error {
 	return err
 }
 
-func (s *GRPCServer) Stop(ctx context.Context) error { return s.Shutdown(ctx) }
-
-// Shutdown gracefully stops the server. If ctx expires before GracefulStop
-// finishes, it falls back to a hard Stop.
 func (s *GRPCServer) Shutdown(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
-		s.server.GracefulStop()
-		close(done)
-	}()
-	select {
-	case <-done:
-		s.waitForServeExit()
-		return nil
-	case <-ctx.Done():
-		s.server.Stop()
-		<-done
-		s.waitForServeExit()
-		return ctx.Err()
-	}
-}
-
-func (s *GRPCServer) serveListener(ctx context.Context, ln net.Listener) error {
-	s.serveDone = make(chan struct{})
-	serveErr := make(chan error, 1)
-	go func() {
-		defer close(s.serveDone)
-		err := s.server.Serve(ln)
-		if errors.Is(err, grpc.ErrServerStopped) {
-			err = nil
+	s.closeOnce.Do(func() {
+		done := make(chan struct{})
+		go func() {
+			s.server.GracefulStop()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			s.server.Stop()
+			<-done
+			s.closeErr = ctx.Err()
 		}
-		serveErr <- err
-	}()
-
-	select {
-	case err := <-serveErr:
-		return err
-	case <-ctx.Done():
-		return nil
-	}
-}
-
-func (s *GRPCServer) waitForServeExit() {
-	if s.serveDone != nil {
-		<-s.serveDone
-	}
+		if s.started {
+			<-s.serveDone
+		}
+	})
+	return s.closeErr
 }
 
 type grpcTraceHandler struct {
@@ -124,6 +119,19 @@ func (h *grpcTraceHandler) Export(
 	ctx context.Context,
 	req *coltracepb.ExportTraceServiceRequest,
 ) (*coltracepb.ExportTraceServiceResponse, error) {
-	rejected, firstErr := record(ctx, h.recorder, h.metrics, h.logger, req.GetResourceSpans())
-	return buildExportResponse(rejected, firstErr, h.logger), nil
+	records, malformed := Normalize(req.GetResourceSpans())
+	h.metrics.incSpansReceived(len(records) + malformed)
+	h.metrics.incSpansMalformed(malformed)
+	out := record(ctx, h.recorder, h.logger, records)
+	// Transient takes priority over permanent: clients do not retry
+	// PartialSuccess, so reporting a transient rejection that way would
+	// silently drop a recoverable valid span.
+	if out.transient != nil {
+		h.logger.Warn("ingest: transient backpressure",
+			zap.Int("rejected", out.rejected),
+			zap.Int("malformed", malformed),
+			zap.Error(out.transient))
+		return nil, status.Error(codes.Unavailable, classifyForClient(out.transient))
+	}
+	return buildExportResponse(out.rejected, malformed, out.permanent, h.logger), nil
 }

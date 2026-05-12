@@ -26,6 +26,7 @@ func TestLoad_DefaultsWhenNoPath(t *testing.T) {
 	assertDuration(t, 60*time.Second, cfg.Buffer.QuietPeriod)
 	assertDuration(t, 10*time.Minute, cfg.Buffer.MaxTTL)
 	assertDuration(t, 5*time.Second, cfg.Buffer.SweepInterval)
+	assertDuration(t, 10*time.Second, cfg.Buffer.ValkeyOperationTimeout)
 	assertEqual(t, runtime.NumCPU(), cfg.Buffer.SweepWorkerPoolSize)
 	assertEqual(t, "greptimedb:4001", cfg.Emitter.GreptimeDBEndpoint)
 	assertEqual(t, "greptimedb:4003", cfg.Emitter.GreptimeDBSqlEndpoint)
@@ -53,6 +54,7 @@ func TestLoad_YAMLOverridesDefaults(t *testing.T) {
 	assertEqual(t, "0.0.0.0:14317", cfg.Ingestion.OTLPGRPCEndpoint)
 	assertEqual(t, "valkey.internal:6379", cfg.Buffer.ValkeyAddr)
 	assertEqual(t, 2, cfg.Buffer.ValkeyDB)
+	assertDuration(t, 4*time.Second, cfg.Buffer.ValkeyOperationTimeout)
 	assertDuration(t, 45*time.Second, cfg.Buffer.QuietPeriod)
 	assertDuration(t, 8*time.Minute, cfg.Buffer.MaxTTL)
 	assertEqual(t, "greptimedb.internal:4001", cfg.Emitter.GreptimeDBEndpoint)
@@ -69,6 +71,7 @@ func TestLoad_YAMLOverridesDefaults(t *testing.T) {
 func TestLoad_EnvOverridesYAML(t *testing.T) {
 	t.Setenv("BUFFER_VALKEY_ADDR", "env-valkey:6379")
 	t.Setenv("BUFFER_QUIET_PERIOD", "90s")
+	t.Setenv("BUFFER_VALKEY_OPERATION_TIMEOUT", "7s")
 	t.Setenv("SERVICE_LOG_LEVEL", "warn")
 	t.Setenv("EMITTER_MAX_RETRIES", "7")
 	t.Setenv("EMITTER_QUEUE_CAPACITY", "512")
@@ -82,11 +85,29 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 
 	assertEqual(t, "env-valkey:6379", cfg.Buffer.ValkeyAddr)
 	assertDuration(t, 90*time.Second, cfg.Buffer.QuietPeriod)
+	assertDuration(t, 7*time.Second, cfg.Buffer.ValkeyOperationTimeout)
 	assertEqual(t, "warn", cfg.Service.LogLevel)
 	assertEqual(t, 7, cfg.Emitter.MaxRetries)
 	assertEqual(t, 512, cfg.Emitter.QueueCapacity)
 	assertEqual(t, "30d", cfg.Emitter.TableTTL)
 	assertEqual(t, "env-greptime-sql:4003", cfg.Emitter.GreptimeDBSqlEndpoint)
+}
+
+func TestValidate_RejectsZeroValkeyOperationTimeout(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempYAML(t, []byte(`
+buffer:
+  valkey_operation_timeout: "0s"
+`))
+
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "buffer.valkey_operation_timeout must be > 0") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 func TestLoad_SecretsOnlyFromEnv(t *testing.T) {

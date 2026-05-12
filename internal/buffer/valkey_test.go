@@ -102,7 +102,7 @@ func TestNewValkeyBuffer_Validation(t *testing.T) {
 
 	t.Run("empty addr", func(t *testing.T) {
 		t.Parallel()
-		if _, err := NewValkeyBuffer(t.Context(), ValkeyOptions{MaxTTL: time.Minute, Logger: logger}); err == nil ||
+		if _, err := NewValkeyBuffer(t.Context(), ValkeyOptions{MaxTTL: time.Minute, OperationTimeout: time.Second, Logger: logger}); err == nil ||
 			!strings.Contains(err.Error(), "addr is required") {
 			t.Errorf("want 'addr is required', got %v", err)
 		}
@@ -110,15 +110,23 @@ func TestNewValkeyBuffer_Validation(t *testing.T) {
 
 	t.Run("zero max_ttl", func(t *testing.T) {
 		t.Parallel()
-		if _, err := NewValkeyBuffer(t.Context(), ValkeyOptions{Addr: "127.0.0.1:6379", Logger: logger}); err == nil ||
+		if _, err := NewValkeyBuffer(t.Context(), ValkeyOptions{Addr: "127.0.0.1:6379", OperationTimeout: time.Second, Logger: logger}); err == nil ||
 			!strings.Contains(err.Error(), "max_ttl must be > 0") {
 			t.Errorf("want 'max_ttl must be > 0', got %v", err)
 		}
 	})
 
+	t.Run("zero operation_timeout", func(t *testing.T) {
+		t.Parallel()
+		if _, err := NewValkeyBuffer(t.Context(), ValkeyOptions{Addr: "127.0.0.1:6379", MaxTTL: time.Minute, Logger: logger}); err == nil ||
+			!strings.Contains(err.Error(), "operation_timeout must be > 0") {
+			t.Errorf("want 'operation_timeout must be > 0', got %v", err)
+		}
+	})
+
 	t.Run("nil logger", func(t *testing.T) {
 		t.Parallel()
-		if _, err := NewValkeyBuffer(t.Context(), ValkeyOptions{Addr: "127.0.0.1:6379", MaxTTL: time.Minute}); err == nil ||
+		if _, err := NewValkeyBuffer(t.Context(), ValkeyOptions{Addr: "127.0.0.1:6379", MaxTTL: time.Minute, OperationTimeout: time.Second}); err == nil ||
 			!strings.Contains(err.Error(), "logger is required") {
 			t.Errorf("want 'logger is required', got %v", err)
 		}
@@ -150,9 +158,10 @@ func TestNewValkeyBuffer_DialRetriesUntilCtxDone(t *testing.T) {
 	defer cancel()
 
 	_, err := NewValkeyBuffer(ctx, ValkeyOptions{
-		Addr:   unreachableAddr(t),
-		MaxTTL: time.Minute,
-		Logger: zap.New(core),
+		Addr:             unreachableAddr(t),
+		MaxTTL:           time.Minute,
+		OperationTimeout: time.Second,
+		Logger:           zap.New(core),
 	})
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -446,10 +455,11 @@ func TestDrain_AtomicAgainstConcurrentPut(t *testing.T) {
 	defer cancel()
 
 	buf, err := NewValkeyBuffer(ctx, ValkeyOptions{
-		Addr:     addr,
-		Password: os.Getenv("TRACEALYZER_TEST_VALKEY_PASSWORD"),
-		MaxTTL:   time.Minute,
-		Logger:   zap.NewNop(),
+		Addr:             addr,
+		Password:         os.Getenv("TRACEALYZER_TEST_VALKEY_PASSWORD"),
+		MaxTTL:           time.Minute,
+		OperationTimeout: 5 * time.Second,
+		Logger:           zap.NewNop(),
 	})
 	if err != nil {
 		t.Fatalf("NewValkeyBuffer: %v", err)

@@ -36,7 +36,7 @@ func TestTopologyComputer_RootPresent_ReturnsRow(t *testing.T) {
 		},
 	}
 
-	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, buffer.TriggerQuiet, records)
+	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, records)
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestTopologyComputer_MultiRoot_ReturnsAllRows(t *testing.T) {
 		},
 	}
 
-	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, buffer.TriggerQuiet, records)
+	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, records)
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestTopologyComputer_NoRoot_ReturnsErrNoRootAndOrphans(t *testing.T) {
 		},
 	}
 
-	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, buffer.TriggerMaxTTL, records)
+	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, records)
 	if !errors.Is(err, sweep.ErrNoRoot) {
 		t.Fatalf("err: want ErrNoRoot, got %v", err)
 	}
@@ -159,7 +159,7 @@ func TestTopologyComputer_PropagatesSizeBytesFromRecord(t *testing.T) {
 		},
 	}
 
-	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, buffer.TriggerQuiet, records)
+	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, records)
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestTopologyComputer_EmptyInput_IsNotErrNoRoot(t *testing.T) {
 	t.Parallel()
 
 	var traceID [16]byte
-	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, buffer.TriggerQuiet, nil)
+	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, nil)
 	if err != nil {
 		t.Fatalf("err: want nil on empty input, got %v", err)
 	}

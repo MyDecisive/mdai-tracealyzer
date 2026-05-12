@@ -5,6 +5,7 @@ ingestion:
 buffer:
   valkey_addr: "valkey.internal:6379"
   valkey_db: 2
+  valkey_operation_timeout: "4s"
   quiet_period: "45s"
   max_ttl: "8m"
   sweep_interval: "3s"

@@ -10,11 +10,14 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/run"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -33,14 +36,18 @@ const (
 // HTTPServer serves OTLP/HTTP at POST /v1/traces. Only
 // application/x-protobuf is accepted; application/json is deferred past v1.
 //
-// HTTPServer implements run.Component when constructed with a non-empty
-// addr (Start binds and serves). Pre-bound listeners use Serve directly.
+// Start binds addr and spawns the serve goroutine; tests with pre-bound
+// listeners use Serve directly.
 type HTTPServer struct {
 	server *http.Server
 	addr   string
 	logger *zap.Logger
 
+	started   bool
+	listener  net.Listener
 	serveDone chan struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewHTTPServer builds the server without starting it. addr is consumed
@@ -68,10 +75,7 @@ func NewHTTPServer(rec Recorder, addr string, metrics *Metrics, logger *zap.Logg
 
 func (*HTTPServer) Name() string { return "otlp_http" }
 
-// Start binds addr and runs Serve until ctx cancels. It returns nil when
-// ctx cancels; Stop must be called separately to halt the underlying HTTP
-// server.
-func (s *HTTPServer) Start(ctx context.Context) error {
+func (s *HTTPServer) Start(ctx context.Context, host run.Host) error {
 	if s.addr == "" {
 		return errors.New("HTTPServer.Start: addr is empty")
 	}
@@ -80,11 +84,31 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.addr, err)
 	}
-	return s.serveListener(ctx, ln)
+	s.listener = ln
+	s.serveDone = make(chan struct{})
+	s.started = true
+	go func() {
+		defer close(s.serveDone)
+		err := s.server.Serve(ln)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			host.Fatal("otlp_http", err)
+		}
+	}()
+	return nil
 }
 
-// Serve runs the server on a pre-bound listener. The serve loop ends when
-// Shutdown is called; ctx is not consulted.
+// Addr returns the bound listener address after Start, or nil if Start was
+// never called or failed.
+func (s *HTTPServer) Addr() net.Addr {
+	if s.listener == nil {
+		return nil
+	}
+	return s.listener.Addr()
+}
+
+// Serve is a test-only entry point that runs the HTTP server on a pre-bound
+// listener. It bypasses Start (no listener bind, no host escalation). Tests
+// must still call Shutdown to halt the server. Production callers use Start.
 func (s *HTTPServer) Serve(ln net.Listener) error {
 	err := s.server.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
@@ -93,36 +117,14 @@ func (s *HTTPServer) Serve(ln net.Listener) error {
 	return err
 }
 
-func (s *HTTPServer) Stop(ctx context.Context) error { return s.Shutdown(ctx) }
-
-// Shutdown gracefully stops the server. If Start was used, it also waits
-// for the inner Serve goroutine to exit.
 func (s *HTTPServer) Shutdown(ctx context.Context) error {
-	err := s.server.Shutdown(ctx)
-	if s.serveDone != nil {
-		<-s.serveDone
-	}
-	return err
-}
-
-func (s *HTTPServer) serveListener(ctx context.Context, ln net.Listener) error {
-	s.serveDone = make(chan struct{})
-	serveErr := make(chan error, 1)
-	go func() {
-		defer close(s.serveDone)
-		err := s.server.Serve(ln)
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
+	s.closeOnce.Do(func() {
+		s.closeErr = s.server.Shutdown(ctx)
+		if s.started {
+			<-s.serveDone
 		}
-		serveErr <- err
-	}()
-
-	select {
-	case err := <-serveErr:
-		return err
-	case <-ctx.Done():
-		return nil
-	}
+	})
+	return s.closeErr
 }
 
 func readDecodedBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
@@ -184,8 +186,23 @@ func (h *httpTraceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rejected, firstErr := record(r.Context(), h.recorder, h.metrics, h.logger, req.GetResourceSpans())
-	out, marshalErr := proto.Marshal(buildExportResponse(rejected, firstErr, h.logger))
+	records, malformed := Normalize(req.GetResourceSpans())
+	h.metrics.incSpansReceived(len(records) + malformed)
+	h.metrics.incSpansMalformed(malformed)
+	res := record(r.Context(), h.recorder, h.logger, records)
+	// Transient takes priority over permanent: clients do not retry
+	// PartialSuccess, so reporting a transient rejection that way would
+	// silently drop a recoverable valid span.
+	if res.transient != nil {
+		h.logger.Warn("ingest: transient backpressure",
+			zap.Int("rejected", res.rejected),
+			zap.Int("malformed", malformed),
+			zap.Error(res.transient))
+		writeRPCStatus(w, http.StatusServiceUnavailable, codes.Unavailable,
+			classifyForClient(res.transient), h.logger)
+		return
+	}
+	out, marshalErr := proto.Marshal(buildExportResponse(res.rejected, malformed, res.permanent, h.logger))
 	if marshalErr != nil {
 		h.logger.Error("encode trace response", zap.Error(marshalErr))
 		http.Error(w, "encode response", http.StatusInternalServerError)
@@ -194,4 +211,19 @@ func (h *httpTraceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentTypeProtobuf)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
+}
+
+// writeRPCStatus emits a protobuf-encoded google.rpc.Status body, the
+// shape OTLP/HTTP requires for 4xx/5xx responses. Falls back to a plain
+// text body only if Status proto marshaling itself fails.
+func writeRPCStatus(w http.ResponseWriter, httpCode int, grpcCode codes.Code, msg string, logger *zap.Logger) {
+	body, err := proto.Marshal(status.New(grpcCode, msg).Proto())
+	if err != nil {
+		logger.Error("encode status proto", zap.Error(err))
+		http.Error(w, msg, httpCode)
+		return
+	}
+	w.Header().Set("Content-Type", contentTypeProtobuf)
+	w.WriteHeader(httpCode)
+	_, _ = w.Write(body)
 }
