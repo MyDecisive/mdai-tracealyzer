@@ -13,6 +13,8 @@ spec:
       app.kubernetes.io/name: load-generator
   template:
     metadata:
+      annotations:
+        ad.datadoghq.com/load-generator.logs: '[{"source": "demo"}]'
       labels:
         app.kubernetes.io/name: load-generator
         app.kubernetes.io/part-of: test-stand-demo
@@ -32,10 +34,10 @@ spec:
             - name: DURATION
               value: "0"
             - name: LOAD_PROFILE
-              value: demo
+              value: "__LOAD_PROFILE__"
             - name: RPS
-              value: "10"
+              value: "__LOAD_RPS__"
             - name: ERROR_RATE_PCT
-              value: ""
+              value: "__LOAD_ERROR_RATE_PCT__"
             - name: MIX
-              value: ""
+              value: "__LOAD_MIX__"

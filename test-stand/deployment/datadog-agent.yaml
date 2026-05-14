@@ -107,18 +107,21 @@ spec:
               value: "true"
             - name: DD_LOGS_CONFIG_USE_COMPRESSION
               value: "true"
+            # containerCollectAll is OFF. Log collection is opt-in only via
+            # `ad.datadoghq.com/<container>.logs` pod annotations. This is the
+            # only reliable scope under DD agent v7 — INCLUDE/EXCLUDE filters
+            # are silently bypassed by container_collect_all autodiscovery.
             - name: DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL
-              value: "true"
-            # Global autodiscovery filter: restrict to the demo namespace at
-            # *discovery* time so the file launcher never opens log files for
-            # pods outside it. The logs-only INCLUDE/EXCLUDE variants run too
-            # late — files are tailed first and lines filtered after, which
-            # breaks down under high-volume sources (e.g. the OTel collector's
-            # debug exporter feedback loop).
+              value: "false"
+            # Scope metrics autodiscovery to the demo namespace so built-in
+            # checks (kubelet metadata enrichment, etc.) only consider demo
+            # pods.
             - name: DD_CONTAINER_INCLUDE
               value: kube_namespace:^__DEMO_NAMESPACE__$
-            - name: DD_CONTAINER_EXCLUDE_LOGS
-              value: image:gcr.io/datadoghq/agent:*
+            # Don't autodiscover metric checks on the demo's Redis (it
+            # requires auth the agent doesn't have).
+            - name: DD_CONTAINER_EXCLUDE_METRICS
+              value: image:redis:.*
             - name: DD_REMOTE_CONFIGURATION_ENABLED
               value: "false"
             - name: DD_INVENTORIES_ENABLED

@@ -39,6 +39,14 @@ DEMO_DATADOG_SECRET_NAME ?= test-vv-integration-secret
 # Demo scenario for one-shot emits.
 DEMO_SCENARIO ?= browse
 
+# Load generator knobs substituted into test-stand/deployment/load-generator.yaml.
+# Empty values for LOAD_MIX / LOAD_ERROR_RATE_PCT are honored (load-generator
+# treats them as unset). Override per-invocation via `make demo-load-up VAR=…`.
+DEMO_LOAD_RPS             ?= 10
+DEMO_LOAD_PROFILE         ?= demo
+DEMO_LOAD_MIX             ?=
+DEMO_LOAD_ERROR_RATE_PCT  ?=
+
 # =============================================================================
 # Derived values
 # =============================================================================
@@ -258,10 +266,14 @@ demo-rollout:
 # =============================================================================
 
 demo-load-up: demo-loadgen-kind-load
-	$(DEMO_KUBECTL) apply -f $(DEMO_DEPLOY_DIR)/load-generator.yaml
+	sed -e 's|__LOAD_PROFILE__|$(DEMO_LOAD_PROFILE)|g' \
+		-e 's|__LOAD_RPS__|$(DEMO_LOAD_RPS)|g' \
+		-e 's|__LOAD_ERROR_RATE_PCT__|$(DEMO_LOAD_ERROR_RATE_PCT)|g' \
+		-e 's|__LOAD_MIX__|$(DEMO_LOAD_MIX)|g' \
+		$(DEMO_DEPLOY_DIR)/load-generator.yaml | $(DEMO_KUBECTL) apply -f -
 
 demo-load-down:
-	$(DEMO_KUBECTL) delete -f $(DEMO_DEPLOY_DIR)/load-generator.yaml --ignore-not-found
+	$(DEMO_KUBECTL) delete deployment/load-generator --ignore-not-found
 
 demo-load-logs:
 	$(DEMO_KUBECTL) logs -f -l app.kubernetes.io/name=load-generator
