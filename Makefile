@@ -36,6 +36,11 @@ DEMO_DATADOG_FORWARDER_URL ?= http://$(TEST_GATEWAY_NAME)-collector.$(NAMESPACE)
 # The Secret must have an `api-key` data field.
 DEMO_DATADOG_SECRET_NAME ?= test-vv-integration-secret
 
+# DD_CLUSTER_NAME and DD_TAGS values substituted into datadog-agent.yaml.
+# Defaults track the kind cluster + demo namespace; override per-environment.
+DEMO_DD_CLUSTER_NAME ?= $(KIND_CLUSTER_NAME)
+DEMO_DD_ENV          ?= $(DEMO_NAMESPACE)
+
 # Demo scenario for one-shot emits.
 DEMO_SCENARIO ?= browse
 
@@ -235,13 +240,16 @@ demo-apply:
 		echo "  kubectl --context=$(KUBECTL_CONTEXT) -n $(NAMESPACE) create secret generic $(DEMO_DATADOG_SECRET_NAME) --from-literal=api-key=<DD_API_KEY>"; \
 		exit 1; \
 	}
-	@kubectl --context=$(KUBECTL_CONTEXT) -n $(NAMESPACE) get secret $(DEMO_DATADOG_SECRET_NAME) -o yaml \
-		| sed -e '/^  namespace:/d' -e '/^  uid:/d' -e '/^  resourceVersion:/d' -e '/^  creationTimestamp:/d' \
+	@key=$$(kubectl --context=$(KUBECTL_CONTEXT) -n $(NAMESPACE) get secret $(DEMO_DATADOG_SECRET_NAME) -o jsonpath='{.data.api-key}' | base64 -d); \
+		kubectl --context=$(KUBECTL_CONTEXT) -n $(DEMO_NAMESPACE) create secret generic $(DEMO_DATADOG_SECRET_NAME) \
+			--from-literal=api-key="$$key" --dry-run=client -o yaml \
 		| $(DEMO_KUBECTL) apply -f -
 	$(DEMO_KUBECTL) apply $(addprefix -f ,$(DEMO_CORE_MANIFESTS))
 	sed -e 's|__DATADOG_FORWARDER_URL__|$(DEMO_DATADOG_FORWARDER_URL)|g' \
 		-e 's|__DATADOG_SECRET_NAME__|$(DEMO_DATADOG_SECRET_NAME)|g' \
 		-e 's|__DEMO_NAMESPACE__|$(DEMO_NAMESPACE)|g' \
+		-e 's|__DD_CLUSTER_NAME__|$(DEMO_DD_CLUSTER_NAME)|g' \
+		-e 's|__DD_ENV__|$(DEMO_DD_ENV)|g' \
 		$(DEMO_DEPLOY_DIR)/datadog-agent.yaml | $(DEMO_KUBECTL) apply -f -
 
 demo-apply-external:

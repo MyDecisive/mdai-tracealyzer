@@ -71,6 +71,10 @@ spec:
                   key: api-key
             - name: DD_SITE
               value: us5.datadoghq.com
+            - name: DD_CLUSTER_NAME
+              value: __DD_CLUSTER_NAME__
+            - name: DD_TAGS
+              value: "cluster:__DD_CLUSTER_NAME__ env:__DD_ENV__"
             - name: DD_HOSTNAME
               valueFrom:
                 fieldRef:
@@ -123,6 +127,11 @@ spec:
             - name: DD_CONTAINER_EXCLUDE_METRICS
               value: image:redis:.*
             - name: DD_REMOTE_CONFIGURATION_ENABLED
+              value: "false"
+            # DD_CLUSTER_NAME being set lifts the empty-name gate that
+            # would otherwise block orchestrator-explorer from pushing K8s
+            # state to orchestrator.<DD_SITE>; keep it explicitly disabled.
+            - name: DD_ORCHESTRATOR_EXPLORER_ENABLED
               value: "false"
             - name: DD_INVENTORIES_ENABLED
               value: "false"

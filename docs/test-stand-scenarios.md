@@ -300,6 +300,8 @@ curl -s 'http://localhost:8081/deep?scenario=deep&depth=4'
 
 `depth=4` produces `gateway → checkout → inventory-http → catalog`, giving `hops=4`, `services=4`, `spans=7`.
 
+Server-side, `depth` is clamped to the range `[1, 32]`; values outside are coerced and any invalid input falls back to the default of 8.
+
 ---
 
 ## 11. checkout-async-joined

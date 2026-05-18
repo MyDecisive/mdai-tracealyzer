@@ -13,8 +13,6 @@ spec:
       app.kubernetes.io/name: load-generator
   template:
     metadata:
-      annotations:
-        ad.datadoghq.com/load-generator.logs: '[{"source": "demo"}]'
       labels:
         app.kubernetes.io/name: load-generator
         app.kubernetes.io/part-of: test-stand-demo
