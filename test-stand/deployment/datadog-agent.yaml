@@ -101,22 +101,6 @@ spec:
               value: "1000000"
             - name: DD_APM_DISABLE_RARE_SAMPLER
               value: "true"
-            - name: DD_LOGS_ENABLED
-              value: "true"
-            - name: DD_LOGS_CONFIG_LOGS_DD_URL
-              value: __DATADOG_FORWARDER_URL__
-            - name: DD_LOGS_CONFIG_USE_HTTP
-              value: "true"
-            - name: DD_LOGS_CONFIG_FORCE_USE_HTTP
-              value: "true"
-            - name: DD_LOGS_CONFIG_USE_COMPRESSION
-              value: "true"
-            # containerCollectAll is OFF. Log collection is opt-in only via
-            # `ad.datadoghq.com/<container>.logs` pod annotations. This is the
-            # only reliable scope under DD agent v7 — INCLUDE/EXCLUDE filters
-            # are silently bypassed by container_collect_all autodiscovery.
-            - name: DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL
-              value: "false"
             # Scope metrics autodiscovery to the demo namespace so built-in
             # checks (kubelet metadata enrichment, etc.) only consider demo
             # pods.
@@ -164,23 +148,11 @@ spec:
           volumeMounts:
             - name: pointerdir
               mountPath: /opt/datadog-agent/run
-            - name: logpodpath
-              mountPath: /var/log/pods
-              readOnly: true
-            - name: logcontainerpath
-              mountPath: /var/log/containers
-              readOnly: true
       volumes:
         - name: pointerdir
           hostPath:
             path: /opt/datadog-agent/run
             type: DirectoryOrCreate
-        - name: logpodpath
-          hostPath:
-            path: /var/log/pods
-        - name: logcontainerpath
-          hostPath:
-            path: /var/log/containers
 ---
 apiVersion: v1
 kind: Service

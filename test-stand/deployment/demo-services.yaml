@@ -7,7 +7,6 @@ metadata:
     app.kubernetes.io/part-of: test-stand-demo
 data:
   DD_ENV: local
-  DD_LOGS_INJECTION: "true"
   DD_TRACE_AGENT_URL: http://datadog-agent:8126
   DD_TRACE_SAMPLE_RATE: "1.0"
   DD_TRACE_RATE_LIMIT: "1000000"
@@ -29,8 +28,6 @@ spec:
       app.kubernetes.io/name: catalog-api
   template:
     metadata:
-      annotations:
-        ad.datadoghq.com/demo-svc.logs: '[{"source": "demo"}]'
       labels:
         app.kubernetes.io/name: catalog-api
         app.kubernetes.io/part-of: test-stand-demo
@@ -86,8 +83,6 @@ spec:
       app.kubernetes.io/name: payments-api
   template:
     metadata:
-      annotations:
-        ad.datadoghq.com/demo-svc.logs: '[{"source": "demo"}]'
       labels:
         app.kubernetes.io/name: payments-api
         app.kubernetes.io/part-of: test-stand-demo
@@ -141,8 +136,6 @@ spec:
       app.kubernetes.io/name: inventory-http-api
   template:
     metadata:
-      annotations:
-        ad.datadoghq.com/demo-svc.logs: '[{"source": "demo"}]'
       labels:
         app.kubernetes.io/name: inventory-http-api
         app.kubernetes.io/part-of: test-stand-demo
@@ -196,8 +189,6 @@ spec:
       app.kubernetes.io/name: inventory-grpc-service
   template:
     metadata:
-      annotations:
-        ad.datadoghq.com/demo-svc.logs: '[{"source": "demo"}]'
       labels:
         app.kubernetes.io/name: inventory-grpc-service
         app.kubernetes.io/part-of: test-stand-demo
@@ -249,8 +240,6 @@ spec:
       app.kubernetes.io/name: checkout-api
   template:
     metadata:
-      annotations:
-        ad.datadoghq.com/demo-svc.logs: '[{"source": "demo"}]'
       labels:
         app.kubernetes.io/name: checkout-api
         app.kubernetes.io/part-of: test-stand-demo
@@ -314,8 +303,6 @@ spec:
       app.kubernetes.io/name: gateway-api
   template:
     metadata:
-      annotations:
-        ad.datadoghq.com/demo-svc.logs: '[{"source": "demo"}]'
       labels:
         app.kubernetes.io/name: gateway-api
         app.kubernetes.io/part-of: test-stand-demo
@@ -379,8 +366,6 @@ spec:
       app.kubernetes.io/name: notifier
   template:
     metadata:
-      annotations:
-        ad.datadoghq.com/demo-svc.logs: '[{"source": "demo"}]'
       labels:
         app.kubernetes.io/name: notifier
         app.kubernetes.io/part-of: test-stand-demo
