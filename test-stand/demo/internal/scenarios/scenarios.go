@@ -7,9 +7,10 @@ import (
 )
 
 type Scenario struct {
-	Name  string
-	Path  string
-	Query map[string]string
+	Name    string
+	Path    string
+	Query   map[string]string
+	IsError bool
 }
 
 func (s Scenario) URL(base string) (string, error) {
@@ -33,8 +34,8 @@ var all = []Scenario{
 	{Name: "checkout-http", Path: "/checkout", Query: map[string]string{"transport": "http", "rollback": "false"}},
 	{Name: "checkout-grpc", Path: "/checkout", Query: map[string]string{"transport": "grpc", "rollback": "false"}},
 	{Name: "checkout-rollback-grpc", Path: "/checkout", Query: map[string]string{"transport": "grpc", "rollback": "true"}},
-	{Name: "checkout-http-error", Path: "/checkout", Query: map[string]string{"transport": "http", "fail": "true"}},
-	{Name: "checkout-grpc-error", Path: "/checkout", Query: map[string]string{"transport": "grpc"}},
+	{Name: "checkout-http-error", Path: "/checkout", Query: map[string]string{"transport": "http", "fail": "true"}, IsError: true},
+	{Name: "checkout-grpc-error", Path: "/checkout", Query: map[string]string{"transport": "grpc"}, IsError: true},
 	{Name: "wide", Path: "/wide"},
 	{Name: "deep", Path: "/deep"},
 	{Name: "checkout-async-joined", Path: "/checkout", Query: map[string]string{"transport": "grpc", "notify": "joined"}},

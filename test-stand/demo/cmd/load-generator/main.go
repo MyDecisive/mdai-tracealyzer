@@ -18,6 +18,17 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/test-stand/demo/internal/scenarios"
 )
 
+const (
+	workers    = 8
+	defaultRPS = 10
+
+	loadProfileFull   = "full"
+	loadProfileDemo   = "demo"
+	loadProfileCustom = "custom"
+
+	demoMixSpec = "browse:50,inventory-grpc:20,checkout-grpc:15,wide:5,deep:5,checkout-async-joined:3,checkout-grpc-error:1,checkout-http-error:1"
+)
+
 type weightedScenario struct {
 	Name   string
 	Weight int
@@ -67,7 +78,7 @@ func (m mix) pick(r *rand.Rand) string {
 	return m.scenarios[len(m.scenarios)-1].Name
 }
 
-func defaultMix() string {
+func fullMixSpec() string {
 	names := scenarios.Names()
 	parts := make([]string, 0, len(names))
 	for _, n := range names {
@@ -78,6 +89,62 @@ func defaultMix() string {
 		parts = append(parts, fmt.Sprintf("%s:%d", n, weight))
 	}
 	return strings.Join(parts, ",")
+}
+
+func resolveMixSpec(profile, customSpec string) (string, error) {
+	switch profile {
+	case loadProfileFull:
+		return fullMixSpec(), nil
+	case loadProfileDemo:
+		return demoMixSpec, nil
+	case loadProfileCustom:
+		if strings.TrimSpace(customSpec) == "" {
+			return "", fmt.Errorf("LOAD_PROFILE=custom requires MIX")
+		}
+		return customSpec, nil
+	default:
+		return "", fmt.Errorf("invalid LOAD_PROFILE %q (want full, demo, or custom)", profile)
+	}
+}
+
+func applyErrorRate(m mix, pct int) (mix, error) {
+	if pct < 0 || pct > 100 {
+		return mix{}, fmt.Errorf("ERROR_RATE_PCT must be 0..100, got %d", pct)
+	}
+	var errSum, nonErrSum int
+	for _, s := range m.scenarios {
+		def, _ := scenarios.Get(s.Name)
+		if def.IsError {
+			errSum += s.Weight
+		} else {
+			nonErrSum += s.Weight
+		}
+	}
+	if errSum == 0 && pct > 0 {
+		return mix{}, fmt.Errorf("ERROR_RATE_PCT=%d but mix has no error scenarios", pct)
+	}
+	if nonErrSum == 0 && pct < 100 {
+		return mix{}, fmt.Errorf("ERROR_RATE_PCT=%d but mix has no non-error scenarios", pct)
+	}
+	scaled := mix{scenarios: make([]weightedScenario, 0, len(m.scenarios))}
+	for _, s := range m.scenarios {
+		def, _ := scenarios.Get(s.Name)
+		var weight int
+		if def.IsError {
+			weight = s.Weight * pct * nonErrSum
+		} else {
+			weight = s.Weight * (100 - pct) * errSum
+		}
+		if weight == 0 {
+			continue
+		}
+		scaled.scenarios = append(scaled.scenarios, weightedScenario{Name: s.Name, Weight: weight})
+		scaled.total += weight
+	}
+	if scaled.total == 0 {
+		return mix{}, fmt.Errorf("ERROR_RATE_PCT=%d produced an empty mix", pct)
+	}
+	return scaled, nil
 }
 
 func parseDuration(name, fallback string) (time.Duration, error) {
@@ -101,7 +168,8 @@ func main() {
 	}
 
 	service := "load-generator"
-	logger := common.NewLogger(service)
+	logger := common.NewLogger(service, common.VerbosityFromEnv())
+	common.StartHeartbeat(logger)
 	gatewayURL := common.Getenv("GATEWAY_URL", "http://gateway-api:8080")
 	client := &http.Client{Timeout: 30 * time.Second}
 
@@ -110,7 +178,7 @@ func main() {
 	}
 
 	if err := runLoop(logger, client, gatewayURL); err != nil {
-		logger.Info(context.Background(), "load-generator error", map[string]any{"event": "load_generator_error", "error": err.Error()})
+		logger.Error(context.Background(), "load-generator error", map[string]any{"event": "load_generator_error", "error": err.Error()})
 		os.Exit(1)
 	}
 }
@@ -131,13 +199,36 @@ func runOnce(logger *common.Logger, client *http.Client, gatewayURL, name string
 }
 
 func runLoop(logger *common.Logger, client *http.Client, gatewayURL string) error {
-	interval, err := parseDuration("INTERVAL", "1s")
+	rps := common.GetenvInt("RPS", defaultRPS)
+	if rps <= 0 {
+		return fmt.Errorf("RPS must be > 0, got %d", rps)
+	}
+	effectiveWorkers := workers
+	if rps < effectiveWorkers {
+		effectiveWorkers = rps
+	}
+	interval := time.Second * time.Duration(effectiveWorkers) / time.Duration(rps)
+
+	profile := common.Getenv("LOAD_PROFILE", loadProfileFull)
+	mixSpec, err := resolveMixSpec(profile, os.Getenv("MIX"))
 	if err != nil {
-		return fmt.Errorf("invalid INTERVAL: %w", err)
+		return err
 	}
-	if interval <= 0 {
-		interval = time.Second
+	m, err := parseMix(mixSpec)
+	if err != nil {
+		return fmt.Errorf("invalid MIX: %w", err)
 	}
+	if value := strings.TrimSpace(os.Getenv("ERROR_RATE_PCT")); value != "" {
+		pct, parseErr := strconv.Atoi(value)
+		if parseErr != nil {
+			return fmt.Errorf("invalid ERROR_RATE_PCT %q: %w", value, parseErr)
+		}
+		m, err = applyErrorRate(m, pct)
+		if err != nil {
+			return err
+		}
+	}
+
 	startDelay, err := parseDuration("START_DELAY", "5s")
 	if err != nil {
 		return fmt.Errorf("invalid START_DELAY: %w", err)
@@ -145,16 +236,6 @@ func runLoop(logger *common.Logger, client *http.Client, gatewayURL string) erro
 	duration, err := parseDuration("DURATION", "0")
 	if err != nil {
 		return fmt.Errorf("invalid DURATION: %w", err)
-	}
-	concurrency := common.GetenvInt("CONCURRENCY", 1)
-	if concurrency < 1 {
-		concurrency = 1
-	}
-
-	mixSpec := common.Getenv("MIX", defaultMix())
-	m, err := parseMix(mixSpec)
-	if err != nil {
-		return fmt.Errorf("invalid MIX: %w", err)
 	}
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -169,8 +250,10 @@ func runLoop(logger *common.Logger, client *http.Client, gatewayURL string) erro
 	logger.Info(rootCtx, "load-generator starting", map[string]any{
 		"event":       "load_generator_started",
 		"gateway_url": gatewayURL,
+		"rps":         rps,
+		"workers":     effectiveWorkers,
 		"interval":    interval.String(),
-		"concurrency": concurrency,
+		"profile":     profile,
 		"duration":    duration.String(),
 		"mix":         mixSpec,
 	})
@@ -184,7 +267,7 @@ func runLoop(logger *common.Logger, client *http.Client, gatewayURL string) erro
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
+	for i := 0; i < effectiveWorkers; i++ {
 		wg.Add(1)
 		workerID := i
 		go func() {
@@ -199,7 +282,7 @@ func runLoop(logger *common.Logger, client *http.Client, gatewayURL string) erro
 					continue
 				}
 				if err := emit(rootCtx, logger, client, gatewayURL, scenario, workerID); err != nil && rootCtx.Err() == nil {
-					logger.Info(rootCtx, "emit failed", map[string]any{
+					logger.Warn(rootCtx, "emit failed", map[string]any{
 						"event":     "emit_failed",
 						"worker_id": workerID,
 						"scenario":  name,

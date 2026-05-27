@@ -4,11 +4,11 @@ A reference for stepping through every scenario the demo exposes and confirming 
 
 ## Before you start
 
-1. Bring up the stack: `make demo-up`. Wait for `kafka`, `postgres`, and `redis` to report healthy:
+1. Bring up the stack: `make demo-up`. Wait for `kafka`, `postgres`, and `redis` Deployments to report ready:
    ```sh
-   docker compose -f test-stand/docker-compose.yaml ps
+   kubectl get pods -l app.kubernetes.io/part-of=test-stand-demo
    ```
-2. Make sure tracealyzer is deployed and the gateway port-forward is up (`make demo-port-forward`). Optional: tail tracealyzer logs (`make logs`) and metrics (`make metrics-forward`).
+2. Make sure tracealyzer and the OTel collector gateway are already deployed in the same cluster (`make deploy-local` and `make demo-deploy-gateway`). Optional: tail tracealyzer logs (`make logs`) and metrics (`make metrics-forward`).
 3. Tracealyzer's default `quiet_period` is **60 seconds**. After each emit, wait at least 65s before checking GreptimeDB. The `max_ttl` safety sweep is 10 minutes — if a scenario row still hasn't appeared after that, something's wrong upstream.
 4. Decide how you'll read GreptimeDB. The HTTP API is the easiest:
    ```sh
@@ -192,9 +192,9 @@ Expected rows: **1**.
 
 | root_id | services | hops | breadth | spans | errors |
 |---|---|---|---|---|---|
-| `gateway-api::GET /checkout` | 4 | 3 | 2 | 7 | 3 |
+| `gateway-api::GET /checkout` | 4 | 3 | 2 | 7 | 5 |
 
-`errors` = 3 because only the server spans are tagged: `gateway-api` server, `checkout-api` server, and `payments-api` server. dd-trace-go's HTTP **client** integration does not auto-tag 5xx responses as errors — its convention is that the server records the failure and the client only records transport-level failures (network, timeout, connect refused). If you see a 0, error tagging is being lost in the OTLP translation; if you see >3, somebody added client-side error tagging via `httptrace.RTWithErrorCheck` or similar.
+`errors` = 5: three server spans (`gateway-api`, `checkout-api`, `payments-api` — all returning ≥ 500) plus two HTTP client spans whose responses were ≥ 500 (`gateway-api` client to `checkout-api` saw 502, `checkout-api` client to `payments-api` saw 500). Both server and client wrappers are configured with an explicit `status ≥ 500` predicate via `WithStatusCheck` / `RTWithStatusCheck`, so HTTP client errors are symmetric with server errors. The `checkout-api` client to `inventory-http-api` is not tagged because inventory returned 200. If you see 3, the `RTWithStatusCheck` on the client wrapper is missing or wrong; if you see 0, error tagging is being lost in the OTLP translation.
 
 ---
 
@@ -217,11 +217,11 @@ Expected rows: **1**.
 
 | root_id | services | hops | breadth | spans | errors |
 |---|---|---|---|---|---|
-| `gateway-api::GET /checkout` | 3 | 3 | 1 | 5 | 4 |
+| `gateway-api::GET /checkout` | 3 | 3 | 1 | 5 | 5 |
 
 `services` is 3 because payments-api is never invoked. `breadth` is 1 (single chain).
 
-`errors` = 4: `inventory-grpc-service` server (returned `codes.Internal`), `checkout-api` gRPC client (the gRPC client interceptor *does* auto-tag non-OK status, unlike the HTTP client), `checkout-api` server (handler returned error → 500), and `gateway-api` server. The `gateway-api` HTTP client to `checkout-api` is *not* tagged for the same reason as scenario 7.
+`errors` = 5: `inventory-grpc-service` server (returned `codes.Internal`), `checkout-api` gRPC client (gRPC interceptor auto-tags non-OK status), `checkout-api` server (handler returned error → 500), `gateway-api` HTTP client to `checkout-api` (saw 500 — tagged by the explicit `RTWithStatusCheck(status ≥ 500)` policy), and `gateway-api` server.
 
 ---
 
@@ -231,24 +231,28 @@ Expected rows: **1**.
 make demo-emit DEMO_SCENARIO=wide
 ```
 
-Gateway calls four downstream services concurrently.
+Gateway issues eight parallel downstream calls — two per backing service, with distinct operation names so each appears as its own span.
 
 Trace shape:
 ```
 gateway-api (server, GET /wide)
-├── gateway-api (client, GET /catalog) → catalog-api (server)
-├── gateway-api (client, GET /availability) → inventory-http-api (server)
+├── gateway-api (client, GET /catalog)         → catalog-api (server)            [op: fetch_catalog]
+├── gateway-api (client, GET /catalog)         → catalog-api (server)            [op: fetch_featured]
+├── gateway-api (client, GET /availability)    → inventory-http-api (server)
+├── gateway-api (client, POST /reserve)        → inventory-http-api (server)
 ├── gateway-api (gRPC client, CheckAvailability) → inventory-grpc-service (server)
-└── gateway-api (client, GET /authorize) → payments-api (server)
+├── gateway-api (gRPC client, ReserveItems)      → inventory-grpc-service (server)
+├── gateway-api (client, GET /authorize)       → payments-api (server)           [op: preauthorize_payment]
+└── gateway-api (client, GET /authorize)       → payments-api (server)           [op: quote_payment]
 ```
 
 Expected rows: **1**.
 
 | root_id | services | hops | breadth | spans | errors |
 |---|---|---|---|---|---|
-| `gateway-api::GET /wide` | 5 | 2 | 4 | 9 | 0 |
+| `gateway-api::GET /wide` | 5 | 2 | 8 | 17 | 0 |
 
-`breadth` = 4 (gateway server has four children). This is the highest-breadth scenario.
+`breadth` = 8 (gateway server has eight children). This is the highest-breadth scenario. `services` stays at 5 — each gateway-side call name disambiguates the span but the underlying services are still catalog-api, inventory-http-api, inventory-grpc-service, and payments-api alongside the gateway-api root.
 
 ---
 
@@ -258,21 +262,45 @@ Expected rows: **1**.
 make demo-emit DEMO_SCENARIO=deep
 ```
 
-Trace shape:
+Every role exposes a `/deep` endpoint that accepts a `depth` query parameter. Each invocation decrements `depth` and forwards to the **next service in a fixed cycle**, returning a leaf when `depth ≤ 1`. The cycle is:
+
 ```
-gateway-api (server, GET /deep)
-└── gateway-api (client, GET /deep) → checkout-api (server, GET /deep)
-    └── checkout-api (client, GET /deep-check) → inventory-http-api (server, GET /deep-check)
-        └── inventory-http-api (client, GET /catalog) → catalog-api (server)
+gateway-api → checkout-api → inventory-http-api → catalog-api → payments-api → gateway-api → …
+```
+
+Every hop crosses a service boundary, so `service_hop_depth` grows linearly with `depth`. The load-generator scenario emits without a query string, so the gateway applies its default of 8.
+
+Trace shape (default `depth=8` — eight service spans, wrapping around the cycle once):
+```
+gateway-api (server, GET /deep)                                            [depth=8]
+└── gateway-api (client, GET /deep) → checkout-api (server)                [depth=7]
+    └── checkout-api (client, GET /deep) → inventory-http-api (server)     [depth=6]
+        └── inventory-http-api (client, GET /deep) → catalog-api (server)  [depth=5]
+            └── catalog-api (client, GET /deep) → payments-api (server)    [depth=4]
+                └── payments-api (client, GET /deep) → gateway-api (server)         [depth=3]
+                    └── gateway-api (client, GET /deep) → checkout-api (server)     [depth=2]
+                        └── checkout-api (client, GET /deep) → inventory-http-api (server) [depth=1, leaf]
 ```
 
 Expected rows: **1**.
 
 | root_id | services | hops | breadth | spans | errors |
 |---|---|---|---|---|---|
-| `gateway-api::GET /deep` | 4 | 4 | 1 | 7 | 0 |
+| `gateway-api::GET /deep` | 5 | 8 | 1 | 15 | 0 |
 
-`hops` = 4 is the highest-depth scenario. Use this to verify the hop-depth metric responds to chain length.
+`spans` = 15: eight server spans (one per role visit) plus seven client spans (one between each pair). `breadth` = 1 — every span has at most one child.
+
+`hops` = 8 because every parent→child crosses a service boundary, and `service_hop_depth` increments on each cross-service transition (revisits count). `services` = 5 distinct: `gateway-api`, `checkout-api`, `inventory-http-api`, `catalog-api`, `payments-api`. Use this scenario to verify that hop depth tracks span chain length when the chain is genuinely cross-service.
+
+To make `hops` lower than 8 without rebuilding, supply a smaller `depth`:
+
+```sh
+curl -s 'http://localhost:8081/deep?scenario=deep&depth=4'
+```
+
+`depth=4` produces `gateway → checkout → inventory-http → catalog`, giving `hops=4`, `services=4`, `spans=7`.
+
+Server-side, `depth` is clamped to the range `[1, 32]`; values outside are coerced and any invalid input falls back to the default of 8.
 
 ---
 
@@ -399,7 +427,7 @@ The Redis spans use `service.name=gateway-api`, which is why `services` drops to
 
 To force a cold call again:
 ```sh
-docker compose -f test-stand/docker-compose.yaml exec redis redis-cli FLUSHALL
+kubectl exec deployment/redis -- redis-cli FLUSHALL
 ```
 
 ---
@@ -412,7 +440,7 @@ Quick triage table:
 |---|---|
 | Zero rows for a scenario, even after 65s | trace not finalizing — check `topology_traces_finalized_total` and `topology_orphan_spans_total`; if orphans rose, span propagation is broken upstream |
 | `services` is one higher than expected on every scenario | demo-control-style intermediate hop slipped back in, or load-generator is being counted as a service |
-| `services` is one lower than expected | a downstream service is dying silently — check `docker compose ps` |
+| `services` is one lower than expected | a downstream service is dying silently — check `kubectl get pods -l app.kubernetes.io/part-of=test-stand-demo` |
 | Multiple rows for a single-trace scenario (1 → 2+) | trace-context propagation breaking at one of the service boundaries; check `dd.trace_id` consistency in service logs |
 | Detached scenario only produces one row | Kafka producer or consumer not running; see the notifier troubleshooting in `README.md` |
 | `errors` always 0 even on error scenarios | error tagging is being dropped by datadogreceiver; check the OTel collector logs for the translation |

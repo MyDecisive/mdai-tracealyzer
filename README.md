@@ -10,13 +10,18 @@ The service does not make the sampling decision itself, store full trace data, r
 
 ## Running the test-stand demo
 
-The `test-stand/` tree exercises the upstream side — a Datadog agent plus several demo microservices that emit realistic traces. The flow is: demo services → Datadog agent → OTel collector gateway (kind) → tracealyzer (kind).
+The `test-stand/` tree exercises the upstream side — a Datadog agent plus several demo microservices that emit realistic traces. The flow is: demo services → in-cluster Datadog agent → OTel collector gateway → tracealyzer. Everything runs in the same kind cluster as tracealyzer itself, so traces flow end-to-end without any port-forward bridging.
 
-Every demo container (catalog, checkout, gateway, payments, inventory-http, inventory-grpc, notifier) is one role of a single `demo-svc` binary; compose runs it seven times with distinct `DEMO_ROLE` and `DD_SERVICE` env vars. Adding a new role means a new `cmd/demo-svc/role_<name>.go` plus a compose entry — no new module to wire.
+Every demo Deployment (catalog, checkout, gateway, payments, inventory-http, inventory-grpc, notifier) runs the same `demo-svc` binary under a different `DEMO_ROLE`. Adding a new role means a new `cmd/demo-svc/role_<name>.go` plus a Deployment in `test-stand/deployment/demo-services.yaml` — no new module to wire.
 
 ### One-time setup
 
 ```sh
+# Provision the Datadog API-key Secret in $(NAMESPACE) — required by demo-apply.
+# Name is overridable via DEMO_DATADOG_SECRET_NAME; key must be `api-key`.
+kubectl -n mdai create secret generic test-vv-integration-secret \
+    --from-literal=api-key=<DD_API_KEY>
+
 # Deploy the OTel collector gateway to the kind cluster.
 make demo-deploy-gateway
 
@@ -24,30 +29,32 @@ make demo-deploy-gateway
 make deploy-local
 ```
 
+### Forwarder modes
+
+The setup above wires the demo's Datadog agent at the in-project sample OTel Collector (**Mode A**). For **Mode B**, where the agent points at an existing in-cluster endpoint (e.g. an `mdai-envoy` Service), skip `demo-deploy-gateway` and use `make demo-apply-external DEMO_DATADOG_FORWARDER_URL=…` in place of `make demo-up`. See [`test-stand/deployment/README.md`](test-stand/deployment/README.md#forwarder-modes) for details.
+
 ### Per-session
 
-Open three terminals:
-
 ```sh
-# Terminal 1 — port-forward the gateway so docker-compose services can reach it.
-make demo-port-forward
-
-# Terminal 2 — port-forward tracealyzer metrics (optional, for curl localhost:9090/metrics).
-make metrics-forward
-
-# Terminal 3 — tail tracealyzer logs.
-make logs
-```
-
-Then in a fourth terminal:
-
-```sh
-# Bring up the demo services (Datadog agent + catalog/checkout/inventory/...).
+# Build demo + load-generator images, kind-load them, apply the stack.
 make demo-up
 
-# Emit a scenario — curls gateway-api directly via the host port published by compose.
+# Emit a single scenario (one-shot Pod, output streams back).
 make demo-emit DEMO_SCENARIO=browse
+
+# Optional: tail tracealyzer logs and metrics from elsewhere in the same cluster.
+make logs
+make metrics-forward       # then: curl localhost:9090/metrics
 ```
+
+To poke the gateway by hand instead of via `make demo-emit`:
+
+```sh
+make demo-app-port-forward # service/gateway-api 8081:8080
+curl -s 'http://localhost:8081/wide?scenario=wide'
+```
+
+See [`test-stand/deployment/README.md`](test-stand/deployment/README.md) for the manifest layout and iteration tips.
 
 ### Test scenarios
 
@@ -61,8 +68,8 @@ make demo-emit DEMO_SCENARIO=browse
 | `checkout-rollback-grpc` | Checkout over gRPC with rollback — saga shape with three-way fan-out from checkout |
 | `checkout-http-error` | Checkout over HTTP where payments returns 500 — exercises `error_count` on the HTTP path |
 | `checkout-grpc-error` | Checkout over gRPC where inventory `ReserveItems` returns `codes.Internal` — exercises `error_count` on the gRPC path |
-| `wide` | Gateway fans out concurrently to catalog, inventory-http, inventory-grpc, and payments — pushes `breadth` past 3 |
-| `deep` | gateway → checkout → inventory-http → catalog — pushes `service_hop_depth` to 4 |
+| `wide` | Gateway issues eight parallel downstream calls (catalog ×2, inventory-http ×2, inventory-grpc ×2, payments ×2 — distinct operation names) — pushes `breadth` to 8 |
+| `deep` | `/deep` cycles through gateway → checkout → inventory-http → catalog → payments → gateway → … with a `depth` query parameter (default 8). Every hop is cross-service so `service_hop_depth` tracks `depth` linearly |
 | `checkout-async-joined` | Checkout publishes to Kafka (trace context is always injected into headers); notifier consumes asynchronously, extracts the context, and joins the same trace — exercises messaging-derived operations on a non-root span and tests quiet-period accumulation across late-arriving spans. |
 | `checkout-async-detached` | Same producer behavior as `joined` — headers carry trace context. The detached flag instructs the notifier consumer to **skip extraction**, so its span becomes a new root with a `messaging.operation.type=process` operation — exercises messaging-derived operations on a root span. |
 | `catalog-db` | Gateway → catalog (HTTP) → Postgres `SELECT items` (CLIENT span with `db.system=postgresql`) — exercises operation derivation on non-HTTP/non-gRPC/non-messaging CLIENT spans (the `span.Name()` fallback). |
@@ -72,15 +79,26 @@ Start with `browse` to confirm basic span ingestion, then use `checkout-rollback
 
 ### Continuous load
 
-A `load-generator` service is included in the compose stack behind a `load` profile so it stays off by default. It sends requests to `gateway-api` on a configurable interval with a weighted-random scenario mix.
+A `load-generator` Deployment lives in `test-stand/deployment/load-generator.yaml` but is **not** applied by `make demo-up`. Apply it separately when you want sustained traffic:
 
 ```sh
-make demo-load-up      # start
-make demo-load-logs    # tail
-make demo-load-down    # stop and remove
+make demo-load-up      # apply the Deployment
+make demo-load-logs    # tail it
+make demo-load-down    # remove it
 ```
 
-Configuration (env on the service in `test-stand/docker-compose.yaml`): `INTERVAL` (Go duration, default `1s`), `CONCURRENCY` (default `1`), `MIX` (`name:weight` pairs, comma-separated), `DURATION` (`0` = forever, otherwise a Go duration for bounded soak runs), `START_DELAY`, `GATEWAY_URL`. The default mix covers all fourteen scenarios with `wide` and `deep` doubled.
+Configuration (env on the Deployment in `test-stand/deployment/load-generator.yaml`, edit and re-apply or `kubectl set env`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RPS` | `10` | Target requests per second across the worker pool. The pool is fixed at 8 workers (capped at `RPS` for very low rates); the per-worker tick interval is derived from `RPS`. |
+| `LOAD_PROFILE` | `demo` | Scenario mix preset. `demo` is a focused 8-scenario mix with ~2% errors — the controlled high-volume / rare-error path the before/after sampling demo arc is built around. `full` weights all fourteen scenarios (`wide`/`deep` doubled) for broad local-testing coverage. `custom` requires `MIX` to be set. |
+| `MIX` | _(unset)_ | Comma-separated `name:weight` pairs. Honored **only** when `LOAD_PROFILE=custom`; ignored otherwise. |
+| `ERROR_RATE_PCT` | _(unset)_ | Optional integer `0..100`. When set, error-scenario weights in the resolved mix are rescaled so the error rate hits the target; fails fast if the chosen mix has no errors. |
+| `DEMO_LOG_VERBOSITY` | `modest` | Inherited from the shared `traced-service-env` ConfigMap. `heavy` enables `DEBUG` call sites and per-service heartbeats. |
+| `START_DELAY` | `5s` | Delay before workers begin emitting (lets the stack stabilize). |
+| `DURATION` | `0` | `0` = run until killed; any Go duration bounds the run for soak tests. |
+| `GATEWAY_URL` | `http://gateway-api:8080` | Target gateway endpoint. |
 
 ### Messaging
 
@@ -90,9 +108,9 @@ The producer and consumer wrappers in `internal/common/kafka.go` set `messaging.
 
 ### Database and cache
 
-The default stack also includes a Postgres 16 instance (seeded from `test-stand/postgres/init.sql` with an `items` table) and a Redis 7 cache. The wrappers in `internal/common/db.go` and `internal/common/cache.go` annotate each query with `db.system`, `db.statement`, and `db.operation`, and emit `span.kind=client` with a generic span name (`postgres.query`, `redis.get`, `redis.set`). Operation derivation falls through to `span.Name()` for these spans, exercising the fallback path that no HTTP, gRPC, or messaging scenario reaches.
+The default stack also includes a Postgres 16 instance (seeded from the `postgres-init` ConfigMap in `test-stand/deployment/postgres-init.yaml` with an `items` table) and a Redis 7 cache. The wrappers in `internal/common/db.go` and `internal/common/cache.go` annotate each query with `db.system`, `db.statement`, and `db.operation`, and emit `span.kind=client` with a generic span name (`postgres.query`, `redis.get`, `redis.set`). Operation derivation falls through to `span.Name()` for these spans, exercising the fallback path that no HTTP, gRPC, or messaging scenario reaches.
 
-Catalog connects via `POSTGRES_DSN` and serves Postgres-backed responses on `?source=db`. Gateway connects via `REDIS_ADDR` and uses the cache on `?cache=true`. Both env vars are wired in compose; service startup is gated on the Postgres and Redis healthchecks so the demo apps don't crash-loop while the dependencies come up.
+Catalog connects via `POSTGRES_DSN` and serves Postgres-backed responses on `?source=db`. Gateway connects via `REDIS_ADDR` and uses the cache on `?cache=true`. Both env vars are wired on the Deployments in `test-stand/deployment/demo-services.yaml`; Postgres and Redis expose readiness probes so the demo Pods come up after their dependencies are ready.
 
 ### Iterating on tracealyzer
 
@@ -108,8 +126,8 @@ make deploy-local
 
 ```sh
 make logs                                              # tracealyzer log tail
-make demo-gateway-logs                                 # OTel collector gateway logs
-make demo-agent-logs                                   # Datadog agent logs
+make demo-collector-logs                               # OTel collector gateway logs
+make demo-agent-logs                                   # Datadog agent (in-cluster DaemonSet) logs
 curl -s localhost:9090/metrics | grep ^topology_      # requires make metrics-forward
 ```
 
@@ -145,8 +163,8 @@ A Grafana dashboard built on these metrics is shipped from the `mdai-hub` charts
 ### Tear down
 
 ```sh
-make demo-down             # stop docker-compose services
-make demo-delete-gateway   # remove gateway from kind
+make demo-down             # remove demo Deployments / Services / Jobs / ConfigMaps
+make demo-delete-gateway   # remove the OTel collector gateway
 ```
 
 ## Local build

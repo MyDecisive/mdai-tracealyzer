@@ -47,6 +47,10 @@ func (w *statusWriter) WriteHeader(statusCode int) {
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 
+func isServerError(statusCode int) bool {
+	return statusCode >= 500
+}
+
 func RegisterJSONRoute(mux *http.ServeMux, service string, logger *Logger, method, path string, handler HandlerFunc) {
 	base := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != method {
@@ -80,6 +84,13 @@ func RegisterJSONRoute(mux *http.ServeMux, service string, logger *Logger, metho
 			"route":      path,
 			"transport":  "http",
 		})
+		logger.Debug(ctx, "request validating", map[string]any{
+			"event":      "request_validating",
+			"request_id": meta.RequestID,
+			"scenario":   meta.Scenario,
+			"route":      path,
+			"query":      r.URL.RawQuery,
+		})
 
 		payload, err := handler(ctx, r, meta)
 		statusCode := sw.statusCode
@@ -89,6 +100,14 @@ func RegisterJSONRoute(mux *http.ServeMux, service string, logger *Logger, metho
 			if errors.As(err, &httpErr) {
 				statusCode = httpErr.Status
 			}
+			logger.Error(ctx, "handler failed", map[string]any{
+				"event":       "handler_failed",
+				"request_id":  meta.RequestID,
+				"scenario":    meta.Scenario,
+				"route":       path,
+				"status_code": statusCode,
+				"error":       err.Error(),
+			})
 			sw.WriteHeader(statusCode)
 			_ = json.NewEncoder(sw).Encode(map[string]any{
 				"request_id": meta.RequestID,
@@ -118,6 +137,7 @@ func RegisterJSONRoute(mux *http.ServeMux, service string, logger *Logger, metho
 		base,
 		service,
 		resource,
+		httptrace.WithStatusCheck(isServerError),
 		httptrace.WithSpanOptions(
 			ddtracer.Tag(ext.SpanKind, ext.SpanKindServer),
 			ddtracer.Tag(ext.SpanType, ext.SpanTypeWeb),
@@ -132,6 +152,7 @@ func NewTracedHTTPClient(service string) *http.Client {
 		httptrace.RTWithResourceNamer(func(req *http.Request) string {
 			return req.Method + " " + req.URL.Path
 		}),
+		httptrace.RTWithStatusCheck(isServerError),
 		httptrace.RTWithSpanOptions(
 			ddtracer.Tag(ext.SpanKind, ext.SpanKindClient),
 			ddtracer.Tag(ext.SpanType, ext.SpanTypeWeb),
@@ -177,13 +198,38 @@ func JSONRequest(ctx context.Context, client *http.Client, logger *Logger, metho
 		req.Header.Set("Content-Type", "application/json")
 	}
 
+	logger.Debug(ctx, "downstream dispatch", map[string]any{
+		"event":      "downstream_dispatch",
+		"request_id": meta.RequestID,
+		"scenario":   meta.Scenario,
+		"operation":  operation,
+		"target":     parsedURL.Path,
+		"transport":  "http",
+	})
+
 	resp, err := client.Do(req)
 	if err != nil {
+		logger.Error(ctx, "downstream unreachable", map[string]any{
+			"event":      "downstream_unreachable",
+			"request_id": meta.RequestID,
+			"scenario":   meta.Scenario,
+			"operation":  operation,
+			"target":     parsedURL.Path,
+			"error":      err.Error(),
+		})
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		logger.Warn(ctx, "downstream response error", map[string]any{
+			"event":       "downstream_response_error",
+			"request_id":  meta.RequestID,
+			"scenario":    meta.Scenario,
+			"operation":   operation,
+			"target":      parsedURL.Path,
+			"status_code": resp.StatusCode,
+		})
 		return nil, &HTTPError{
 			Status:  http.StatusBadGateway,
 			Message: fmt.Sprintf("%s returned %d", parsedURL.Path, resp.StatusCode),

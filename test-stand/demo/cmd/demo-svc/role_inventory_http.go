@@ -41,20 +41,7 @@ func runInventoryHTTP(service string, logger *common.Logger) error {
 		}, nil
 	})
 
-	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/deep-check", func(ctx context.Context, r *http.Request, meta common.RequestMeta) (any, error) {
-		catalog, err := common.JSONRequest(ctx, httpClient, logger, http.MethodGet, catalogURL+"/catalog", "inventory.fetch_catalog", meta, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{
-			"request_id": meta.RequestID,
-			"scenario":   meta.Scenario,
-			"warehouse":  "east",
-			"available":  42,
-			"status":     "available",
-			"catalog":    catalog,
-		}, nil
-	})
+	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/deep", deepForwardHandler(httpClient, logger, catalogURL, "inventory.deep_chain"))
 
 	addr := ":" + common.Getenv("PORT", "8080")
 	return http.ListenAndServe(addr, mux)

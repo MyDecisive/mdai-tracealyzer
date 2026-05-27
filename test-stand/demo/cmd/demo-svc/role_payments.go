@@ -8,7 +8,11 @@ import (
 )
 
 func runPayments(service string, logger *common.Logger) error {
+	httpClient := common.NewTracedHTTPClient(service)
+	gatewayURL := common.Getenv("GATEWAY_URL", "http://gateway-api:8080")
+
 	mux := http.NewServeMux()
+	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/deep", deepForwardHandler(httpClient, logger, gatewayURL, "payments.deep_chain"))
 	common.RegisterJSONRoute(mux, service, logger, http.MethodGet, "/authorize", func(ctx context.Context, r *http.Request, meta common.RequestMeta) (any, error) {
 		if r.URL.Query().Get("fail") == "true" {
 			return nil, &common.HTTPError{Status: http.StatusInternalServerError, Message: "payments authorization failed"}

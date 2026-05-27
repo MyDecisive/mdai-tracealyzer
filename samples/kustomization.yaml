@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Mode A test gateway. Apply with `kubectl apply -k samples/`.
+# To deploy a renamed instance, add an overlay under samples/overlays/<name>/
+# with a `nameSuffix:` or a JSON patch on metadata.name.
+resources:
+  - collector-datadog-agent-test-gateway.yaml
