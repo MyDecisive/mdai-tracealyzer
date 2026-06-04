@@ -1,3 +1,8 @@
+{{- define "debug.values" -}}
+{{- fail (printf "GLOBAL=%s" (.Values.global | toJson)) -}}
+{{- end -}}
+
+
 {{/*
 Expand the chart name.
 */}}
@@ -56,8 +61,16 @@ Create the name of the service account to use.
 {{- end }}
 {{- end }}
 
+
 {{- define "greptimedb.host" -}}
+{{- $global := index .Values "global" | default dict -}}
+{{- $greptime := index $global "greptime" | default dict -}}
+{{- $fullnameOverride := index $greptime "fullnameOverride" | default "" -}}
+{{- if $fullnameOverride -}}
+{{- printf "%s.%s.svc.cluster.local" $fullnameOverride .Release.Namespace -}}
+{{- else -}}
 {{- printf "%s-greptimedb.%s.svc.cluster.local" .Release.Name .Release.Namespace -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "greptimedb.psqlPort" -}}
