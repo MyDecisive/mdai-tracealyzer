@@ -1,8 +1,3 @@
-{{- define "debug.values" -}}
-{{- fail (printf "GLOBAL=%s" (.Values.global | toJson)) -}}
-{{- end -}}
-
-
 {{/*
 Expand the chart name.
 */}}
