@@ -55,3 +55,75 @@ Create the name of the service account to use.
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+
+{{- define "greptimedb.host" -}}
+{{- $global := index .Values "global" | default dict -}}
+{{- $greptime := index $global "greptime" | default dict -}}
+{{- $fullnameOverride := index $greptime "fullnameOverride" | default "" -}}
+{{- if $fullnameOverride -}}
+{{- printf "%s.%s.svc.cluster.local" $fullnameOverride .Release.Namespace -}}
+{{- else -}}
+{{- printf "%s-greptimedb.%s.svc.cluster.local" .Release.Name .Release.Namespace -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "greptimedb.psqlPort" -}}
+{{- $cfg := index .Values "greptimedb-standalone" -}}
+{{- $port := "4003" -}}
+{{- if and $cfg $cfg.postgresServicePort -}}
+{{- $port = printf "%v" $cfg.postgresServicePort -}}
+{{- end -}}
+{{- $port -}}
+{{- end -}}
+
+{{- define "greptimedb.mysqlPort" -}}
+{{- $cfg := index .Values "global.greptimedb" -}}
+{{- $port := "4002" -}}
+{{- if and $cfg $cfg.mysqlServicePort -}}
+{{- $port = printf "%v" $cfg.mysqlServicePort -}}
+{{- end -}}
+{{- $port -}}
+{{- end -}}
+
+{{- define "greptimedb.grpcPort" -}}
+{{- $cfg := index .Values "global.greptimedb" -}}
+{{- $port := "4001" -}}
+{{- if and $cfg $cfg.grpcServicePort -}}
+{{- $port = printf "%v" $cfg.grpcServicePort -}}
+{{- end -}}
+{{- $port -}}
+{{- end -}}
+
+{{- define "greptimedb.database" -}}
+{{- $cfg := index .Values "global.greptimedb" -}}
+{{- $db := "public" -}}
+{{- if and $cfg $cfg.databaseName -}}
+{{- $db = $cfg.databaseName -}}
+{{- end -}}
+{{- $db -}}
+{{- end -}}
+
+{{- define "greptimedb.grpcEndpoint" -}}
+{{- $endpoint := "mdai-greptimedb.mdai.svc.cluster.local:4001" -}}
+
+{{- if and (hasKey .Values "global") (hasKey .Values.global "greptime") -}}
+{{- $endpoint = printf "%s:%s" (include "greptimedb.host" .) (include "greptimedb.grpcPort" .) -}}
+{{- else if and (hasKey .Values "config") (hasKey .Values.config "emitter") (hasKey .Values.config.emitter "greptimedbEndpoint") -}}
+{{- $endpoint = .Values.config.emitter.greptimedbEndpoint -}}
+{{- end -}}
+
+{{- $endpoint -}}
+{{- end -}}
+
+{{- define "greptimedb.psqlEndpoint" -}}
+{{- $endpoint := "mdai-greptimedb.mdai.svc.cluster.local:4003" -}}
+
+{{- if and (hasKey .Values "global") (hasKey .Values.global "greptime") -}}
+{{- $endpoint = printf "%s:%s" (include "greptimedb.host" .) (include "greptimedb.psqlPort" .) -}}
+{{- else if and (hasKey .Values "config") (hasKey .Values.config "emitter") (hasKey .Values.config.emitter "greptimedbSqlEndpoint") -}}
+{{- $endpoint = .Values.config.emitter.greptimedbSqlEndpoint -}}
+{{- end -}}
+
+{{- $endpoint -}}
+{{- end -}}

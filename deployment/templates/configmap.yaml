@@ -18,9 +18,9 @@ data:
       sweep_worker_pool_size: {{ . }}
       {{- end }}
     emitter:
-      greptimedb_endpoint: {{ .Values.config.emitter.greptimedbEndpoint | quote }}
-      greptimedb_sql_endpoint: {{ .Values.config.emitter.greptimedbSqlEndpoint | quote }}
-      greptimedb_database: {{ .Values.config.emitter.greptimedbDatabase | quote }}
+      greptimedb_endpoint: {{ include "greptimedb.grpcEndpoint" . }}
+      greptimedb_sql_endpoint: {{ include "greptimedb.psqlEndpoint" . }}
+      greptimedb_database: {{ include "greptimedb.database" . }}
       table_ttl: {{ .Values.config.emitter.tableTtl | quote }}
       timeout: {{ .Values.config.emitter.timeout | quote }}
       max_retries: {{ .Values.config.emitter.maxRetries }}
