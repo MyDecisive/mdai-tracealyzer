@@ -65,14 +65,16 @@ func (w *greptimeWriter) Write(ctx context.Context, batch writeBatch) error {
 
 	resp, err := w.client.Write(ctx, tbl)
 	if err != nil {
-		return err
+		return fmt.Errorf("greptimedb write: %w", err)
 	}
 	return responseError(resp)
 }
 
 func (w *greptimeWriter) HealthCheck(ctx context.Context) error {
-	_, err := w.client.HealthCheck(ctx)
-	return err
+	if _, err := w.client.HealthCheck(ctx); err != nil {
+		return fmt.Errorf("greptimedb health check: %w", err)
+	}
+	return nil
 }
 
 func (w *greptimeWriter) Close() error {

@@ -17,6 +17,7 @@ type fakeSDKClient struct {
 	errs        []error
 	resps       []*gpb.GreptimeResponse
 	writes      []sdkWriteCall
+	healthErr   error
 	healthCalls int
 	closed      bool
 }
@@ -44,6 +45,9 @@ func (c *fakeSDKClient) Write(ctx context.Context, tables ...*table.Table) (*gpb
 
 func (c *fakeSDKClient) HealthCheck(_ context.Context) (*gpb.HealthCheckResponse, error) {
 	c.healthCalls++
+	if c.healthErr != nil {
+		return nil, c.healthErr
+	}
 	return &gpb.HealthCheckResponse{}, nil
 }
 
@@ -145,6 +149,28 @@ func TestGreptimeWriterReturnsResponseStatusError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "status_code=1234") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGreptimeWriterHealthCheckWrapsError(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeSDKClient{
+		healthErr: errors.New("connection refused"),
+	}
+	writer := &greptimeWriter{
+		client: client,
+	}
+
+	err := writer.HealthCheck(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "greptimedb health check") {
+		t.Fatalf("error missing context: %v", err)
+	}
+	if !errors.Is(err, client.healthErr) {
+		t.Fatalf("wrapped error does not unwrap to the SDK error: %v", err)
 	}
 }
 
