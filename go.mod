@@ -1,6 +1,6 @@
 module github.com/mydecisive/mdai-tracealyzer
 
-go 1.25.0
+go 1.27.1
 
 require (
 	github.com/GreptimeTeam/greptime-proto v0.15.0

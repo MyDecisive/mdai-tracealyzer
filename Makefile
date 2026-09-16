@@ -13,7 +13,7 @@ DEMO_NAMESPACE    ?= test-stand-demo
 # Build / release.
 DOCKER_TAG        ?= 0.1.2
 BUILD_PLATFORMS   ?= linux/arm64,linux/amd64
-GOTOOLCHAIN       ?= go1.25.0
+GOTOOLCHAIN       ?= go1.27.1
 LOCAL_VALUES      ?= deployment/values-local.yaml
 CHART_VERSION     ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
 ifeq ($(CHART_VERSION),)
@@ -91,7 +91,7 @@ endef
 .PHONY: \
 	build test test-race cover coverhtml tidy tidy-check \
 	docker-login docker-build docker-build-local docker-push \
-	kind-load deploy-local redeploy logs metrics-forward \
+	kind-load deploy-local redeploy logs metrics-forward pprof-forward \
 	helm-package helm-publish \
 	demo-deploy-gateway demo-delete-gateway demo-collector-logs demo-collector-port-forward \
 	demo-svc-kind-load demo-loadgen-kind-load demo-kind-load \
@@ -167,6 +167,9 @@ logs:
 
 metrics-forward:
 	$(KUBECTL) port-forward deployment/mdai-tracealyzer 9090:9090
+
+pprof-forward:
+	$(KUBECTL) port-forward deployment/mdai-tracealyzer 6060:6060
 
 # =============================================================================
 # Helm chart release

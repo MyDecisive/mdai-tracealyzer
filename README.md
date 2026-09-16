@@ -45,6 +45,7 @@ make demo-emit DEMO_SCENARIO=browse
 # Optional: tail tracealyzer logs and metrics from elsewhere in the same cluster.
 make logs
 make metrics-forward       # then: curl localhost:9090/metrics
+make pprof-forward         # then: go tool pprof http://localhost:6060/debug/pprof/heap
 ```
 
 To poke the gateway by hand instead of via `make demo-emit`:
@@ -186,6 +187,7 @@ Manifests for deploying the upstream collector live under `samples/`; the Helm c
 The cluster contract once the service exists:
 
 - Container ports: `4317` (OTLP gRPC), `4318` (OTLP HTTP), `9090` (Prometheus scrape + health probes).
+- pprof: `/debug/pprof` on `service.pprof_endpoint`, default `127.0.0.1:6060`. Loopback only and absent from the Service, so it is reachable through `kubectl port-forward` and nothing else; an empty value disables it.
 - Readiness probe: `/healthz/ready` on `9090`; liveness probe: `/healthz/live` on `9090`. In v1 `/healthz/live` returns 200 unconditionally — deadlock detection is deferred.
 - Configuration: ConfigMap for the YAML; Secrets for env-only values.
 - `terminationGracePeriodSeconds` must be `≥ service.shutdown_grace` so the drain completes before SIGKILL.

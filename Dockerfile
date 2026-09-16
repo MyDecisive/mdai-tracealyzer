@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG GO_VERSION=1.25.0
+ARG GO_VERSION=1.27.1
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS builder
 ARG TARGETOS
 ARG TARGETARCH

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
@@ -47,51 +48,50 @@ func TestRetry_FailureThenSuccess(t *testing.T) {
 }
 
 func TestRetry_CancelDuringBackoffReturnsCtxErr(t *testing.T) {
-	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		opErr := errors.New("transient")
+		ctx, cancel := context.WithCancel(t.Context())
 
-	opErr := errors.New("transient")
-	ctx, cancel := context.WithCancel(t.Context())
+		var calls atomic.Int32
+		done := make(chan error, 1)
+		go func() {
+			done <- run.Retry(ctx, "probe", func(context.Context) error {
+				calls.Add(1)
+				return opErr
+			}, run.Backoff{Initial: time.Hour, Max: time.Hour}, zap.NewNop())
+		}()
 
-	var calls atomic.Int32
-	done := make(chan error, 1)
-	go func() {
-		done <- run.Retry(ctx, "probe", func(context.Context) error {
-			calls.Add(1)
-			return opErr
-		}, run.Backoff{Initial: time.Hour, Max: time.Hour}, zap.NewNop())
-	}()
+		synctest.Wait() // returns once Retry is parked in the backoff sleep
+		if calls.Load() == 0 {
+			t.Fatal("Retry did not call op before entering backoff")
+		}
+		cancel()
 
-	// Wait until at least one op call has happened so we know Retry is in
-	// the backoff sleep.
-	for calls.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
-	cancel()
-
-	err := <-done
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err must wrap context.Canceled: %v", err)
-	}
+		err := <-done
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err must wrap context.Canceled: %v", err)
+		}
+	})
 }
 
 func TestRetry_AlreadyCancelledShortCircuits(t *testing.T) {
-	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
+		start := time.Now()
+		err := run.Retry(ctx, "probe", func(context.Context) error {
+			return errors.New("transient")
+		}, run.Backoff{Initial: time.Hour, Max: time.Hour}, zap.NewNop())
+		elapsed := time.Since(start)
 
-	start := time.Now()
-	err := run.Retry(ctx, "probe", func(context.Context) error {
-		return errors.New("transient")
-	}, run.Backoff{Initial: time.Hour, Max: time.Hour}, zap.NewNop())
-	elapsed := time.Since(start)
-
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err must wrap context.Canceled: %v", err)
-	}
-	if elapsed > 100*time.Millisecond {
-		t.Fatalf("must short-circuit on already-cancelled ctx; elapsed=%v", elapsed)
-	}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err must wrap context.Canceled: %v", err)
+		}
+		if elapsed != 0 {
+			t.Fatalf("must short-circuit without sleeping the backoff; elapsed=%v", elapsed)
+		}
+	})
 }
 
 func TestRetry_PermanentErrorStopsRetries(t *testing.T) {

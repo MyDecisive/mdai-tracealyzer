@@ -40,6 +40,7 @@ func TestLoad_DefaultsWhenNoPath(t *testing.T) {
 	assertEqual(t, 1024, cfg.Emitter.QueueCapacity)
 	assertEqual(t, "info", cfg.Service.LogLevel)
 	assertEqual(t, "0.0.0.0:9090", cfg.Service.MetricsEndpoint)
+	assertEqual(t, "127.0.0.1:6060", cfg.Service.PprofEndpoint)
 	assertDuration(t, 30*time.Second, cfg.Service.ShutdownGrace)
 }
 
@@ -66,6 +67,7 @@ func TestLoad_YAMLOverridesDefaults(t *testing.T) {
 	assertDuration(t, 2*time.Second, cfg.Emitter.FlushInterval)
 	assertEqual(t, 4096, cfg.Emitter.QueueCapacity)
 	assertEqual(t, "debug", cfg.Service.LogLevel)
+	assertEqual(t, "", cfg.Service.PprofEndpoint)
 }
 
 func TestLoad_EnvOverridesYAML(t *testing.T) {

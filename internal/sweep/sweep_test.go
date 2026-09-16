@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
@@ -581,176 +582,181 @@ func TestSweeper_StartIsNonBlockingShutdownHalts(t *testing.T) {
 }
 
 func TestSweeper_DoesNotDrainBeforeReadinessGate(t *testing.T) {
-	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		a := traceID(1)
+		buf := &fakeBuffer{
+			scanResult: []buffer.Finalizable{{TraceID: a, Trigger: buffer.TriggerQuiet}},
+			drainSpans: map[[16]byte]map[string]buffer.SpanRecord{
+				a: {"span-a": {TraceID: a}},
+			},
+		}
+		comp := &fakeComputer{}
+		em := &fakeEmitter{}
 
-	a := traceID(1)
-	buf := &fakeBuffer{
-		scanResult: []buffer.Finalizable{{TraceID: a, Trigger: buffer.TriggerQuiet}},
-		drainSpans: map[[16]byte]map[string]buffer.SpanRecord{
-			a: {"span-a": {TraceID: a}},
-		},
-	}
-	comp := &fakeComputer{}
-	em := &fakeEmitter{}
+		gate := make(chan struct{})
+		reg := prometheus.NewRegistry()
+		s, err := New(buf, comp, em, Config{
+			QuietPeriod:    30 * time.Second,
+			MaxTTL:         5 * time.Minute,
+			Interval:       time.Millisecond,
+			WorkerPoolSize: 1,
+		}, gate, NewMetrics(reg), zap.NewNop())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
 
-	gate := make(chan struct{})
-	reg := prometheus.NewRegistry()
-	s, err := New(buf, comp, em, Config{
-		QuietPeriod:    30 * time.Second,
-		MaxTTL:         5 * time.Minute,
-		Interval:       time.Millisecond,
-		WorkerPoolSize: 1,
-	}, gate, NewMetrics(reg), zap.NewNop())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
-
-	if err := s.Start(t.Context(), noopHost{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	time.Sleep(50 * time.Millisecond)
-	if err := s.Shutdown(context.Background()); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
-	if got := buf.scanCalls; got != 0 {
-		t.Errorf("Scan must not run before gate fires: got %d calls", got)
-	}
-	if got := len(buf.drainCalls); got != 0 {
-		t.Errorf("Drain must not run before gate fires: got %d calls", got)
-	}
+		if err := s.Start(t.Context(), noopHost{}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		// Advance the fake clock past several intervals; the ticker only fires
+		// once run() has passed the gate, so nothing must be scanned.
+		time.Sleep(10 * time.Millisecond)
+		synctest.Wait()
+		if got := buf.scanCalls; got != 0 {
+			t.Errorf("Scan must not run before gate fires: got %d calls", got)
+		}
+		if got := len(buf.drainCalls); got != 0 {
+			t.Errorf("Drain must not run before gate fires: got %d calls", got)
+		}
+		if err := s.Shutdown(context.Background()); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	})
 }
 
 func TestSweeper_ClaimedTraceCompletesAcrossShutdown(t *testing.T) {
-	t.Parallel()
-
-	a := traceID(1)
-	drainEntered := make(chan struct{})
-	releaseDrain := make(chan struct{})
-	buf := &blockingBuffer{
-		traceID:      a,
-		drainEntered: drainEntered,
-		releaseDrain: releaseDrain,
-	}
-	comp := &fakeComputer{
-		results: map[[16]byte]computeResult{
-			a: {rows: []topology.RootMetrics{{TraceID: "a"}}},
-		},
-	}
-	em := &fakeEmitter{}
-
-	gate := make(chan struct{})
-	close(gate)
-	reg := prometheus.NewRegistry()
-	s, err := New(buf, comp, em, Config{
-		QuietPeriod:    30 * time.Second,
-		MaxTTL:         5 * time.Minute,
-		Interval:       time.Millisecond,
-		WorkerPoolSize: 1,
-	}, gate, NewMetrics(reg), zap.NewNop())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
-
-	if err := s.Start(t.Context(), noopHost{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	select {
-	case <-drainEntered:
-	case <-time.After(time.Second):
-		t.Fatal("Drain never entered")
-	}
-
-	shutdownDone := make(chan error, 1)
-	go func() { shutdownDone <- s.Shutdown(context.Background()) }()
-
-	// Shutdown must wait on the in-flight Drain.
-	select {
-	case err := <-shutdownDone:
-		t.Fatalf("Shutdown returned while Drain was still in flight: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	close(releaseDrain)
-
-	select {
-	case err := <-shutdownDone:
-		if err != nil {
-			t.Fatalf("Shutdown: %v", err)
+	synctest.Test(t, func(t *testing.T) {
+		a := traceID(1)
+		drainEntered := make(chan struct{})
+		releaseDrain := make(chan struct{})
+		buf := &blockingBuffer{
+			traceID:      a,
+			drainEntered: drainEntered,
+			releaseDrain: releaseDrain,
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Shutdown did not return after Drain released")
-	}
+		comp := &fakeComputer{
+			results: map[[16]byte]computeResult{
+				a: {rows: []topology.RootMetrics{{TraceID: "a"}}},
+			},
+		}
+		em := &fakeEmitter{}
 
-	if got := em.callCount(); got != 1 {
-		t.Fatalf("Emit calls: want 1 (the claimed trace's row), got %d", got)
-	}
+		gate := make(chan struct{})
+		close(gate)
+		reg := prometheus.NewRegistry()
+		s, err := New(buf, comp, em, Config{
+			QuietPeriod:    30 * time.Second,
+			MaxTTL:         5 * time.Minute,
+			Interval:       time.Millisecond,
+			WorkerPoolSize: 1,
+		}, gate, NewMetrics(reg), zap.NewNop())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+
+		if err := s.Start(t.Context(), noopHost{}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		// Deadlines are fake-time; the ticker keeps advancing the clock, so a
+		// stuck sweeper fails here instead of spinning until the test timeout.
+		select {
+		case <-drainEntered: // clock auto-advances to the first tick; Drain blocks
+		case <-time.After(time.Second):
+			t.Fatal("Drain never entered")
+		}
+
+		shutdownDone := make(chan error, 1)
+		go func() { shutdownDone <- s.Shutdown(context.Background()) }()
+
+		// Shutdown must wait on the in-flight Drain.
+		synctest.Wait()
+		select {
+		case err := <-shutdownDone:
+			t.Fatalf("Shutdown returned while Drain was still in flight: %v", err)
+		default:
+		}
+
+		close(releaseDrain)
+
+		select {
+		case err := <-shutdownDone:
+			if err != nil {
+				t.Fatalf("Shutdown: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Shutdown did not return after Drain released")
+		}
+		if got := em.callCount(); got != 1 {
+			t.Fatalf("Emit calls: want 1 (the claimed trace's row), got %d", got)
+		}
+	})
 }
 
 func TestSweeper_UnclaimedTracesLeftInValkeyAcrossShutdown(t *testing.T) {
-	t.Parallel()
-
-	a := traceID(1)
-	drainEntered := make(chan struct{})
-	releaseDrain := make(chan struct{})
-	buf := &blockingBuffer{
-		traceID:      a,
-		extra:        []buffer.Finalizable{{TraceID: traceID(2), Trigger: buffer.TriggerQuiet}, {TraceID: traceID(3), Trigger: buffer.TriggerQuiet}},
-		drainEntered: drainEntered,
-		releaseDrain: releaseDrain,
-	}
-	comp := &fakeComputer{
-		results: map[[16]byte]computeResult{
-			a: {rows: []topology.RootMetrics{{TraceID: "a"}}},
-		},
-	}
-	em := &fakeEmitter{}
-
-	gate := make(chan struct{})
-	close(gate)
-	reg := prometheus.NewRegistry()
-	s, err := New(buf, comp, em, Config{
-		QuietPeriod:    30 * time.Second,
-		MaxTTL:         5 * time.Minute,
-		Interval:       time.Millisecond,
-		WorkerPoolSize: 1,
-	}, gate, NewMetrics(reg), zap.NewNop())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
-
-	if err := s.Start(t.Context(), noopHost{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	select {
-	case <-drainEntered:
-	case <-time.After(time.Second):
-		t.Fatal("Drain never entered")
-	}
-
-	shutdownDone := make(chan error, 1)
-	go func() { shutdownDone <- s.Shutdown(context.Background()) }()
-
-	// Give the claim loop time to observe stopCh and exit.
-	time.Sleep(20 * time.Millisecond)
-	close(releaseDrain)
-
-	select {
-	case err := <-shutdownDone:
-		if err != nil {
-			t.Fatalf("Shutdown: %v", err)
+	synctest.Test(t, func(t *testing.T) {
+		a := traceID(1)
+		drainEntered := make(chan struct{})
+		releaseDrain := make(chan struct{})
+		buf := &blockingBuffer{
+			traceID:      a,
+			extra:        []buffer.Finalizable{{TraceID: traceID(2), Trigger: buffer.TriggerQuiet}, {TraceID: traceID(3), Trigger: buffer.TriggerQuiet}},
+			drainEntered: drainEntered,
+			releaseDrain: releaseDrain,
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Shutdown did not return")
-	}
+		comp := &fakeComputer{
+			results: map[[16]byte]computeResult{
+				a: {rows: []topology.RootMetrics{{TraceID: "a"}}},
+			},
+		}
+		em := &fakeEmitter{}
 
-	if got := len(buf.drainCalls); got != 1 {
-		t.Errorf("only the claimed trace must be drained: got %d Drain calls", got)
-	}
+		gate := make(chan struct{})
+		close(gate)
+		reg := prometheus.NewRegistry()
+		s, err := New(buf, comp, em, Config{
+			QuietPeriod:    30 * time.Second,
+			MaxTTL:         5 * time.Minute,
+			Interval:       time.Millisecond,
+			WorkerPoolSize: 1,
+		}, gate, NewMetrics(reg), zap.NewNop())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+
+		if err := s.Start(t.Context(), noopHost{}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		select {
+		case <-drainEntered:
+		case <-time.After(time.Second):
+			t.Fatal("Drain never entered")
+		}
+
+		shutdownDone := make(chan error, 1)
+		go func() { shutdownDone <- s.Shutdown(context.Background()) }()
+
+		// Wait for the claim loop to observe stopCh (Shutdown has closed it and
+		// is blocked on doneCh) before releasing Drain.
+		synctest.Wait()
+		close(releaseDrain)
+
+		select {
+		case err := <-shutdownDone:
+			if err != nil {
+				t.Fatalf("Shutdown: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Shutdown did not return")
+		}
+		if got := len(buf.drainCalls); got != 1 {
+			t.Errorf("only the claimed trace must be drained: got %d Drain calls", got)
+		}
+	})
 }
 
 // blockingBuffer holds Drain mid-call so tests can observe shutdown
