@@ -1,6 +1,10 @@
 package greptimecfg
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestParseAuth(t *testing.T) {
 	t.Parallel()
@@ -42,9 +46,8 @@ func TestParseAuth(t *testing.T) {
 			t.Parallel()
 
 			gotUser, gotPass := ParseAuth(tt.raw)
-			if gotUser != tt.wantUser || gotPass != tt.wantPass {
-				t.Fatalf("ParseAuth(%q) = (%q, %q), want (%q, %q)", tt.raw, gotUser, gotPass, tt.wantUser, tt.wantPass)
-			}
+			require.Equal(t, tt.wantUser, gotUser, "ParseAuth(%q) user", tt.raw)
+			require.Equal(t, tt.wantPass, gotPass, "ParseAuth(%q) password", tt.raw)
 		})
 	}
 }

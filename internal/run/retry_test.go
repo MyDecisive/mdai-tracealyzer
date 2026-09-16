@@ -10,6 +10,7 @@ import (
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/mydecisive/mdai-tracealyzer/internal/run"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -21,12 +22,8 @@ func TestRetry_ImmediateSuccess(t *testing.T) {
 		calls.Add(1)
 		return nil
 	}, run.Backoff{Initial: time.Millisecond, Max: time.Millisecond}, zap.NewNop())
-	if err != nil {
-		t.Fatalf("Retry: %v", err)
-	}
-	if calls.Load() != 1 {
-		t.Fatalf("calls: want 1, got %d", calls.Load())
-	}
+	require.NoError(t, err)
+	require.Equal(t, int32(1), calls.Load(), "calls")
 }
 
 func TestRetry_FailureThenSuccess(t *testing.T) {
@@ -39,12 +36,8 @@ func TestRetry_FailureThenSuccess(t *testing.T) {
 		}
 		return nil
 	}, run.Backoff{Initial: time.Millisecond, Max: time.Millisecond}, zap.NewNop())
-	if err != nil {
-		t.Fatalf("Retry: %v", err)
-	}
-	if calls.Load() != 2 {
-		t.Fatalf("calls: want 2, got %d", calls.Load())
-	}
+	require.NoError(t, err)
+	require.Equal(t, int32(2), calls.Load(), "calls")
 }
 
 func TestRetry_CancelDuringBackoffReturnsCtxErr(t *testing.T) {
@@ -62,15 +55,11 @@ func TestRetry_CancelDuringBackoffReturnsCtxErr(t *testing.T) {
 		}()
 
 		synctest.Wait() // returns once Retry is parked in the backoff sleep
-		if calls.Load() == 0 {
-			t.Fatal("Retry did not call op before entering backoff")
-		}
+		require.NotZero(t, calls.Load(), "Retry did not call op before entering backoff")
 		cancel()
 
 		err := <-done
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("err must wrap context.Canceled: %v", err)
-		}
+		require.ErrorIs(t, err, context.Canceled)
 	})
 }
 
@@ -85,12 +74,8 @@ func TestRetry_AlreadyCancelledShortCircuits(t *testing.T) {
 		}, run.Backoff{Initial: time.Hour, Max: time.Hour}, zap.NewNop())
 		elapsed := time.Since(start)
 
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("err must wrap context.Canceled: %v", err)
-		}
-		if elapsed != 0 {
-			t.Fatalf("must short-circuit without sleeping the backoff; elapsed=%v", elapsed)
-		}
+		require.ErrorIs(t, err, context.Canceled)
+		require.Zero(t, elapsed, "must short-circuit without sleeping the backoff")
 	})
 }
 
@@ -104,12 +89,8 @@ func TestRetry_PermanentErrorStopsRetries(t *testing.T) {
 		return backoff.Permanent(permErr)
 	}, run.Backoff{Initial: time.Millisecond, Max: time.Millisecond}, zap.NewNop())
 
-	if !errors.Is(err, permErr) {
-		t.Fatalf("err must wrap permErr: %v", err)
-	}
-	if calls.Load() != 1 {
-		t.Fatalf("calls: want 1, got %d", calls.Load())
-	}
+	require.ErrorIs(t, err, permErr)
+	require.Equal(t, int32(1), calls.Load(), "calls")
 }
 
 func TestRetry_ZeroInitialIsRejected(t *testing.T) {
@@ -118,7 +99,5 @@ func TestRetry_ZeroInitialIsRejected(t *testing.T) {
 	err := run.Retry(t.Context(), "probe", func(context.Context) error {
 		return nil
 	}, run.Backoff{}, zap.NewNop())
-	if err == nil {
-		t.Fatal("expected error for zero Initial")
-	}
+	require.Error(t, err, "zero Initial must be rejected")
 }

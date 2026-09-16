@@ -3,7 +3,6 @@ package emit
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	greptime "github.com/GreptimeTeam/greptimedb-ingester-go"
 	"github.com/GreptimeTeam/greptimedb-ingester-go/table"
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
+	"github.com/stretchr/testify/require"
 )
 
 type fakeSDKClient struct {
@@ -75,16 +75,10 @@ func TestGreptimeWriterWritesConfiguredTable(t *testing.T) {
 	}
 
 	err := writer.Write(context.Background(), makeWriteBatch(sampleRows(1), time.Unix(1, 0)))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	require.NoError(t, err, "Write")
 
-	if len(client.writes) != 1 {
-		t.Fatalf("want 1 write attempt, got %d", len(client.writes))
-	}
-	if client.writes[0].table != "trace_root_topology" {
-		t.Fatalf("write table = %q, want trace_root_topology", client.writes[0].table)
-	}
+	require.Len(t, client.writes, 1)
+	require.Equal(t, "trace_root_topology", client.writes[0].table, "write table")
 }
 
 func TestNewGreptimeClientReturnsFactoryClient(t *testing.T) {
@@ -94,15 +88,9 @@ func TestNewGreptimeClientReturnsFactoryClient(t *testing.T) {
 	got, err := newGreptimeClient(testGreptimeConfig(), func(*greptime.Config) (sdkClient, error) {
 		return client, nil
 	})
-	if err != nil {
-		t.Fatalf("newGreptimeClient: %v", err)
-	}
-	if got != client {
-		t.Fatal("expected returned client to be the factory client")
-	}
-	if client.healthCalls != 0 {
-		t.Fatalf("startup health check should be gone; got %d calls", client.healthCalls)
-	}
+	require.NoError(t, err, "newGreptimeClient")
+	require.Same(t, client, got, "expected returned client to be the factory client")
+	require.Zero(t, client.healthCalls, "startup health check should be gone")
 }
 
 func TestGreptimeWriterReturnsTransportError(t *testing.T) {
@@ -116,12 +104,7 @@ func TestGreptimeWriterReturnsTransportError(t *testing.T) {
 	}
 
 	err := writer.Write(context.Background(), makeWriteBatch(sampleRows(1), time.Unix(1, 0)))
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "permission denied") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.ErrorContains(t, err, "permission denied")
 }
 
 func TestGreptimeWriterReturnsResponseStatusError(t *testing.T) {
@@ -144,12 +127,7 @@ func TestGreptimeWriterReturnsResponseStatusError(t *testing.T) {
 	}
 
 	err := writer.Write(context.Background(), makeWriteBatch(sampleRows(1), time.Unix(1, 0)))
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "status_code=1234") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.ErrorContains(t, err, "status_code=1234")
 }
 
 func TestGreptimeWriterHealthCheckWrapsError(t *testing.T) {
@@ -163,37 +141,22 @@ func TestGreptimeWriterHealthCheckWrapsError(t *testing.T) {
 	}
 
 	err := writer.HealthCheck(context.Background())
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "greptimedb health check") {
-		t.Fatalf("error missing context: %v", err)
-	}
-	if !errors.Is(err, client.healthErr) {
-		t.Fatalf("wrapped error does not unwrap to the SDK error: %v", err)
-	}
+	require.ErrorContains(t, err, "greptimedb health check", "error missing context")
+	require.ErrorIs(t, err, client.healthErr, "wrapped error does not unwrap to the SDK error")
 }
 
 func TestBuildTableMapsSchema(t *testing.T) {
 	t.Parallel()
 
 	tbl, err := buildTable(makeWriteBatch(sampleRows(1), time.Unix(1, 2)))
-	if err != nil {
-		t.Fatalf("buildTable: %v", err)
-	}
+	require.NoError(t, err, "buildTable")
 
 	req, err := tbl.ToInsertRequest()
-	if err != nil {
-		t.Fatalf("ToInsertRequest: %v", err)
-	}
+	require.NoError(t, err, "ToInsertRequest")
 
-	if req.GetTableName() != "trace_root_topology" {
-		t.Fatalf("want table trace_root_topology, got %q", req.GetTableName())
-	}
+	require.Equal(t, "trace_root_topology", req.GetTableName())
 	schema := req.GetRows().GetSchema()
-	if got := len(schema); got != 13 {
-		t.Fatalf("want 13 columns, got %d", got)
-	}
+	require.Len(t, schema, 13)
 
 	checkColumn(t, schema[0], "root_id", gpb.SemanticType_TAG, gpb.ColumnDataType_STRING)
 	checkColumn(t, schema[1], "trace_id", gpb.SemanticType_TAG, gpb.ColumnDataType_STRING)
@@ -205,15 +168,9 @@ func TestBuildTableMapsSchema(t *testing.T) {
 
 func checkColumn(t *testing.T, col *gpb.ColumnSchema, name string, semantic gpb.SemanticType, typ gpb.ColumnDataType) {
 	t.Helper()
-	if col.GetColumnName() != name {
-		t.Fatalf("want column %q, got %q", name, col.GetColumnName())
-	}
-	if col.GetSemanticType() != semantic {
-		t.Fatalf("column %q semantic type = %v, want %v", name, col.GetSemanticType(), semantic)
-	}
-	if col.GetDatatype() != typ {
-		t.Fatalf("column %q datatype = %v, want %v", name, col.GetDatatype(), typ)
-	}
+	require.Equal(t, name, col.GetColumnName())
+	require.Equal(t, semantic, col.GetSemanticType(), "column %q semantic type", name)
+	require.Equal(t, typ, col.GetDatatype(), "column %q datatype", name)
 }
 
 func testGreptimeConfig() config.Emitter {

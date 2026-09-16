@@ -3,7 +3,6 @@ package emit
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +12,8 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/topology"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -23,18 +24,14 @@ func (noopHost) Fatal(string, error) {}
 
 // startEmitter calls e.Start (which is non-blocking) and registers a
 // t.Cleanup that calls Shutdown with a 1s grace. The Shutdown error is
-// reported via t.Errorf so cleanup failures fail the test.
+// asserted there so cleanup failures fail the test.
 func startEmitter(t *testing.T, e *Emitter) {
 	t.Helper()
-	if err := e.Start(t.Context(), noopHost{}); err != nil {
-		t.Fatalf("emitter Start: %v", err)
-	}
+	require.NoError(t, e.Start(t.Context(), noopHost{}), "emitter Start")
 	t.Cleanup(func() {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
 		defer stopCancel()
-		if err := e.Shutdown(stopCtx); err != nil {
-			t.Errorf("emitter Shutdown: %v", err)
-		}
+		require.NoError(t, e.Shutdown(stopCtx), "emitter Shutdown")
 	})
 }
 
@@ -94,35 +91,22 @@ func TestEmitterFlushesOnBatchSize(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	writer := &fakeWriter{callCh: make(chan struct{}, 1)}
 	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
 	startEmitter(t, e)
 
-	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
-		t.Fatalf("Emit: %v", emitErr)
-	}
+	require.NoError(t, e.Emit(t.Context(), sampleRows(2)), "Emit")
 
 	waitForCalls(t, writer.callCh, 1)
 
-	if got := writer.batchCount(); got != 1 {
-		t.Fatalf("want 1 batch, got %d", got)
-	}
+	require.Equal(t, 1, writer.batchCount(), "batch count")
 
 	batch := writer.lastBatch()
-	if batch.Table != "trace_root_topology" {
-		t.Fatalf("want table trace_root_topology, got %q", batch.Table)
-	}
-	if len(batch.Rows) != 2 {
-		t.Fatalf("want 2 rows, got %d", len(batch.Rows))
-	}
-	wantTS := fixedNow()()
-	if !batch.Rows[0].Timestamp.Equal(wantTS) {
-		t.Fatalf("want timestamp %v, got %v", wantTS, batch.Rows[0].Timestamp)
-	}
+	require.Equal(t, "trace_root_topology", batch.Table)
+	require.Len(t, batch.Rows, 2)
+	require.WithinDuration(t, fixedNow()(), batch.Rows[0].Timestamp, 0)
 }
 
 func TestEmitterFlushesOnTimer(t *testing.T) {
@@ -130,9 +114,7 @@ func TestEmitterFlushesOnTimer(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	cfg := testEmitterConfig()
 	cfg.BatchSize = 10
@@ -142,15 +124,11 @@ func TestEmitterFlushesOnTimer(t *testing.T) {
 	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow())
 	startEmitter(t, e)
 
-	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
-		t.Fatalf("Emit: %v", emitErr)
-	}
+	require.NoError(t, e.Emit(t.Context(), sampleRows(1)), "Emit")
 
 	waitForCalls(t, writer.callCh, 1)
 
-	if got := writer.batchCount(); got != 1 {
-		t.Fatalf("want 1 batch, got %d", got)
-	}
+	require.Equal(t, 1, writer.batchCount(), "batch count")
 }
 
 func TestEmitterRetriesThenSucceeds(t *testing.T) {
@@ -158,9 +136,7 @@ func TestEmitterRetriesThenSucceeds(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	writer := &fakeWriter{
 		callCh: make(chan struct{}, 3),
@@ -169,18 +145,12 @@ func TestEmitterRetriesThenSucceeds(t *testing.T) {
 	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, writer, fixedNow())
 	startEmitter(t, e)
 
-	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
-		t.Fatalf("Emit: %v", emitErr)
-	}
+	require.NoError(t, e.Emit(t.Context(), sampleRows(2)), "Emit")
 
 	waitForCalls(t, writer.callCh, 3)
 
-	if got := writer.batchCount(); got != 3 {
-		t.Fatalf("want 3 write attempts, got %d", got)
-	}
-	if got := testutil.ToFloat64(m.emissionsFailed); got != 0 {
-		t.Fatalf("want no dropped rows, got %v", got)
-	}
+	require.Equal(t, 3, writer.batchCount(), "write attempts")
+	require.InDelta(t, 0, testutil.ToFloat64(m.emissionsFailed), 0, "dropped rows")
 }
 
 func TestEmitterReturnsErrQueueFullAndCountsDrops(t *testing.T) {
@@ -188,9 +158,7 @@ func TestEmitterReturnsErrQueueFullAndCountsDrops(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	cfg := testEmitterConfig()
 	cfg.QueueCapacity = 1
@@ -203,20 +171,12 @@ func TestEmitterReturnsErrQueueFullAndCountsDrops(t *testing.T) {
 	e := newWithWriter(cfg, logger, m, writer, fixedNow())
 	// Intentionally do NOT start the worker so the queue does not drain.
 
-	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
-		t.Fatalf("first Emit: %v", emitErr)
-	}
+	require.NoError(t, e.Emit(t.Context(), sampleRows(1)), "first Emit")
 
 	err = e.Emit(t.Context(), sampleRows(2))
-	if !errors.Is(err, ErrQueueFull) {
-		t.Fatalf("want ErrQueueFull, got %v", err)
-	}
-	if got := testutil.ToFloat64(m.emissionsFailed); got != 2 {
-		t.Fatalf("want 2 dropped rows, got %v", got)
-	}
-	if logs.Len() == 0 {
-		t.Fatal("expected warning log for dropped rows")
-	}
+	require.ErrorIs(t, err, ErrQueueFull)
+	require.InDelta(t, 2, testutil.ToFloat64(m.emissionsFailed), 0, "dropped rows")
+	require.NotEmpty(t, logs.All(), "expected warning log for dropped rows")
 }
 
 func TestEmitter_ShutdownWithoutStartClosesWriter(t *testing.T) {
@@ -224,27 +184,17 @@ func TestEmitter_ShutdownWithoutStartClosesWriter(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	w := &fakeWriter{}
 	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, w, fixedNow())
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := e.Shutdown(ctx); err != nil {
-		t.Fatalf("Shutdown without Start: %v", err)
-	}
-	if !w.closed {
-		t.Fatal("writer.Close not called when Shutdown is invoked without prior Start")
-	}
-	if err := e.Shutdown(ctx); err != nil {
-		t.Errorf("second Shutdown must be idempotent, got %v", err)
-	}
-	if got := w.closeCount; got != 1 {
-		t.Errorf("writer.Close called %d times; want 1", got)
-	}
+	require.NoError(t, e.Shutdown(ctx), "Shutdown without Start")
+	require.True(t, w.closed, "writer.Close not called when Shutdown is invoked without prior Start")
+	require.NoError(t, e.Shutdown(ctx), "second Shutdown must be idempotent")
+	assert.Equal(t, 1, w.closeCount, "writer.Close call count")
 }
 
 func TestEmitterShutdownFlushesPendingRows(t *testing.T) {
@@ -252,9 +202,7 @@ func TestEmitterShutdownFlushesPendingRows(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	cfg := testEmitterConfig()
 	cfg.BatchSize = 10
@@ -264,22 +212,14 @@ func TestEmitterShutdownFlushesPendingRows(t *testing.T) {
 	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow())
 	startEmitter(t, e)
 
-	if emitErr := e.Emit(t.Context(), sampleRows(1)); emitErr != nil {
-		t.Fatalf("Emit: %v", emitErr)
-	}
+	require.NoError(t, e.Emit(t.Context(), sampleRows(1)), "Emit")
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if stopErr := e.Shutdown(stopCtx); stopErr != nil {
-		t.Fatalf("Shutdown: %v", stopErr)
-	}
+	require.NoError(t, e.Shutdown(stopCtx), "Shutdown")
 
-	if got := writer.batchCount(); got != 1 {
-		t.Fatalf("want 1 batch on stop, got %d", got)
-	}
-	if !writer.closed {
-		t.Fatal("writer was not closed")
-	}
+	require.Equal(t, 1, writer.batchCount(), "batch count on stop")
+	require.True(t, writer.closed, "writer was not closed")
 }
 
 func TestEmitterEmitAfterShutdownReturnsErrClosed(t *testing.T) {
@@ -287,23 +227,17 @@ func TestEmitterEmitAfterShutdownReturnsErrClosed(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, &fakeWriter{}, fixedNow())
 	startEmitter(t, e)
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if stopErr := e.Shutdown(stopCtx); stopErr != nil {
-		t.Fatalf("Shutdown: %v", stopErr)
-	}
+	require.NoError(t, e.Shutdown(stopCtx), "Shutdown")
 
 	err = e.Emit(t.Context(), sampleRows(1))
-	if !errors.Is(err, ErrClosed) {
-		t.Fatalf("want ErrClosed, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrClosed)
 }
 
 func TestEmitterShutdownReturnsWriteError(t *testing.T) {
@@ -311,9 +245,7 @@ func TestEmitterShutdownReturnsWriteError(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	writer := &fakeWriter{
 		errs: []error{
@@ -327,19 +259,12 @@ func TestEmitterShutdownReturnsWriteError(t *testing.T) {
 	e := newWithWriter(cfg, zap.NewNop(), m, writer, fixedNow())
 	startEmitter(t, e)
 
-	if emitErr := e.Emit(t.Context(), sampleRows(2)); emitErr != nil {
-		t.Fatalf("Emit: %v", emitErr)
-	}
+	require.NoError(t, e.Emit(t.Context(), sampleRows(2)), "Emit")
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	err = e.Shutdown(stopCtx)
-	if err == nil {
-		t.Fatal("expected Shutdown to return write error from final flush")
-	}
-	if !strings.Contains(err.Error(), "write failed") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.ErrorContains(t, err, "write failed", "expected Shutdown to return write error from final flush")
 }
 
 func TestMakeWriteBatchMapsAllTopologyFields(t *testing.T) {
@@ -361,50 +286,22 @@ func TestMakeWriteBatchMapsAllTopologyFields(t *testing.T) {
 	}}
 
 	batch := makeWriteBatch(rows, ts)
-	if batch.Table != "trace_root_topology" {
-		t.Fatalf("want table trace_root_topology, got %q", batch.Table)
-	}
-	if len(batch.Rows) != 1 {
-		t.Fatalf("want 1 row, got %d", len(batch.Rows))
-	}
+	require.Equal(t, "trace_root_topology", batch.Table)
+	require.Len(t, batch.Rows, 1)
 
 	got := batch.Rows[0]
-	if !got.Timestamp.Equal(ts) {
-		t.Fatalf("want timestamp %v, got %v", ts, got.Timestamp)
-	}
-	if got.RootID != rows[0].RootID {
-		t.Fatalf("want root_id %q, got %q", rows[0].RootID, got.RootID)
-	}
-	if got.TraceID != rows[0].TraceID {
-		t.Fatalf("want trace_id %q, got %q", rows[0].TraceID, got.TraceID)
-	}
-	if got.RootService != rows[0].RootService {
-		t.Fatalf("want root_service %q, got %q", rows[0].RootService, got.RootService)
-	}
-	if got.RootOperation != rows[0].RootOperation {
-		t.Fatalf("want root_operation %q, got %q", rows[0].RootOperation, got.RootOperation)
-	}
-	if got.Breadth != rows[0].Breadth {
-		t.Fatalf("want breadth %d, got %d", rows[0].Breadth, got.Breadth)
-	}
-	if got.ServiceHopDepth != rows[0].ServiceHopDepth {
-		t.Fatalf("want service_hop_depth %d, got %d", rows[0].ServiceHopDepth, got.ServiceHopDepth)
-	}
-	if got.ServiceCount != rows[0].ServiceCount {
-		t.Fatalf("want service_count %d, got %d", rows[0].ServiceCount, got.ServiceCount)
-	}
-	if got.OperationCount != rows[0].OperationCount {
-		t.Fatalf("want operation_count %d, got %d", rows[0].OperationCount, got.OperationCount)
-	}
-	if got.SpanCount != rows[0].SpanCount {
-		t.Fatalf("want span_count %d, got %d", rows[0].SpanCount, got.SpanCount)
-	}
-	if got.ErrorCount != rows[0].ErrorCount {
-		t.Fatalf("want error_count %d, got %d", rows[0].ErrorCount, got.ErrorCount)
-	}
-	if got.RootDurationNS != rows[0].RootDurationNS {
-		t.Fatalf("want root_duration_ns %d, got %d", rows[0].RootDurationNS, got.RootDurationNS)
-	}
+	require.WithinDuration(t, ts, got.Timestamp, 0)
+	require.Equal(t, rows[0].RootID, got.RootID, "root_id")
+	require.Equal(t, rows[0].TraceID, got.TraceID, "trace_id")
+	require.Equal(t, rows[0].RootService, got.RootService, "root_service")
+	require.Equal(t, rows[0].RootOperation, got.RootOperation, "root_operation")
+	require.Equal(t, rows[0].Breadth, got.Breadth, "breadth")
+	require.Equal(t, rows[0].ServiceHopDepth, got.ServiceHopDepth, "service_hop_depth")
+	require.Equal(t, rows[0].ServiceCount, got.ServiceCount, "service_count")
+	require.Equal(t, rows[0].OperationCount, got.OperationCount, "operation_count")
+	require.Equal(t, rows[0].SpanCount, got.SpanCount, "span_count")
+	require.Equal(t, rows[0].ErrorCount, got.ErrorCount, "error_count")
+	require.Equal(t, rows[0].RootDurationNS, got.RootDurationNS, "root_duration_ns")
 }
 
 func sampleRows(n int) []topology.RootMetrics {
@@ -451,7 +348,7 @@ func waitForCalls(t *testing.T, ch <-chan struct{}, want int) {
 		select {
 		case <-ch:
 		case <-deadline:
-			t.Fatal("timed out waiting for write call")
+			require.FailNow(t, "timed out waiting for write call")
 		}
 	}
 }
@@ -461,28 +358,19 @@ func TestEmitter_EmitAfterShutdownBumpsEmissionsFailed(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, &fakeWriter{}, fixedNow())
 	startEmitter(t, e)
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if stopErr := e.Shutdown(stopCtx); stopErr != nil {
-		t.Fatalf("Shutdown: %v", stopErr)
-	}
+	require.NoError(t, e.Shutdown(stopCtx), "Shutdown")
 
 	rows := sampleRows(3)
-	if emitErr := e.Emit(context.Background(), rows); !errors.Is(emitErr, ErrClosed) {
-		t.Fatalf("Emit: want ErrClosed, got %v", emitErr)
-	}
+	require.ErrorIs(t, e.Emit(context.Background(), rows), ErrClosed, "Emit")
 
-	got := testutil.ToFloat64(m.emissionsFailed)
-	if got != float64(len(rows)) {
-		t.Fatalf("topology_emissions_failed_total: got %v, want %d", got, len(rows))
-	}
+	require.InDelta(t, float64(len(rows)), testutil.ToFloat64(m.emissionsFailed), 0, "topology_emissions_failed_total")
 }
 
 func TestEmitter_ShutdownRejectsConcurrentEmitWithoutSilentLoss(t *testing.T) {
@@ -490,9 +378,7 @@ func TestEmitter_ShutdownRejectsConcurrentEmitWithoutSilentLoss(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	w := &fakeWriter{}
 	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, w, time.Now)
@@ -509,23 +395,17 @@ func TestEmitter_ShutdownRejectsConcurrentEmitWithoutSilentLoss(t *testing.T) {
 
 	select {
 	case err := <-stopErr:
-		t.Fatalf("Shutdown returned %v while RLock was held; should have blocked on Lock", err)
+		require.FailNowf(t, "Shutdown should have blocked on Lock", "returned %v while RLock was held", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
 	e.queue <- sampleRows(1)
 	e.closedMu.RUnlock()
 
-	if err := <-stopErr; err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
-	if got := w.batchCount(); got != 1 {
-		t.Fatalf("writer.batchCount = %d, want 1 (row queued before closed=true must reach the writer)", got)
-	}
+	require.NoError(t, <-stopErr, "Shutdown")
+	require.Equal(t, 1, w.batchCount(), "row queued before closed=true must reach the writer")
 
-	if emitErr := e.Emit(context.Background(), sampleRows(1)); !errors.Is(emitErr, ErrClosed) {
-		t.Fatalf("post-Shutdown Emit: want ErrClosed, got %v", emitErr)
-	}
+	require.ErrorIs(t, e.Emit(context.Background(), sampleRows(1)), ErrClosed, "post-Shutdown Emit")
 }
 
 type slowWriter struct {
@@ -549,9 +429,7 @@ func TestEmitter_ShutdownDuringInFlightWriteIsSafe(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	cfg := config.Emitter{
 		TableTTL:       "14d",
@@ -565,21 +443,15 @@ func TestEmitter_ShutdownDuringInFlightWriteIsSafe(t *testing.T) {
 	w := &slowWriter{delay: 30 * time.Millisecond}
 	e := newWithWriter(cfg, zap.NewNop(), m, w, time.Now)
 
-	if err := e.Start(t.Context(), noopHost{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	require.NoError(t, e.Start(t.Context(), noopHost{}), "Start")
 
-	if emitErr := e.Emit(t.Context(), sampleRows(20)); emitErr != nil {
-		t.Fatalf("Emit: %v", emitErr)
-	}
+	require.NoError(t, e.Emit(t.Context(), sampleRows(20)), "Emit")
 
 	time.Sleep(50 * time.Millisecond)
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopCancel()
-	if stopErr := e.Shutdown(stopCtx); stopErr != nil {
-		t.Fatalf("Shutdown: %v", stopErr)
-	}
+	require.NoError(t, e.Shutdown(stopCtx), "Shutdown")
 }
 
 type hangingWriter struct {
@@ -617,9 +489,7 @@ func TestEmitter_ShutdownClosesWriterWhenContextExpiresMidWrite(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	cfg := config.Emitter{
 		TableTTL:       "14d",
@@ -638,36 +508,25 @@ func TestEmitter_ShutdownClosesWriterWhenContextExpiresMidWrite(t *testing.T) {
 	t.Cleanup(func() { close(w.release) })
 
 	e := newWithWriter(cfg, zap.NewNop(), m, w, time.Now)
-	if err := e.Start(t.Context(), noopHost{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	require.NoError(t, e.Start(t.Context(), noopHost{}), "Start")
 
-	if emitErr := e.Emit(context.Background(), sampleRows(1)); emitErr != nil {
-		t.Fatalf("Emit: %v", emitErr)
-	}
+	require.NoError(t, e.Emit(context.Background(), sampleRows(1)), "Emit")
 
 	select {
 	case <-w.entered:
 	case <-time.After(time.Second):
-		t.Fatal("writer.Write was never called; cannot exercise stuck-write path")
+		require.FailNow(t, "writer.Write was never called; cannot exercise stuck-write path")
 	}
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer stopCancel()
 	stopErr := e.Shutdown(stopCtx)
 
-	if stopErr == nil {
-		t.Fatal("Shutdown returned nil when ctx expired mid-write; want ctx error")
-	}
-	if !errors.Is(stopErr, context.DeadlineExceeded) && !errors.Is(stopErr, context.Canceled) {
-		t.Fatalf("Shutdown error = %v; want context.DeadlineExceeded or context.Canceled", stopErr)
-	}
-	if !w.closed.Load() {
-		t.Fatal("writer.Close() was not called: Shutdown returned with ctx expired and leaked the writer")
-	}
-	if got := w.writeCalls.Load(); got != 1 {
-		t.Fatalf("writer.Write call count = %d; want 1 (no extra final flush with already-canceled ctx)", got)
-	}
+	require.Error(t, stopErr, "Shutdown returned nil when ctx expired mid-write; want ctx error")
+	require.True(t, errors.Is(stopErr, context.DeadlineExceeded) || errors.Is(stopErr, context.Canceled),
+		"Shutdown error = %v; want context.DeadlineExceeded or context.Canceled", stopErr)
+	require.True(t, w.closed.Load(), "writer.Close() was not called: Shutdown returned with ctx expired and leaked the writer")
+	require.Equal(t, int32(1), w.writeCalls.Load(), "writer.Write call count (no extra final flush with already-canceled ctx)")
 }
 
 func TestEmitter_ShutdownGraceExpiryRecordsQueuedRowsAsDropped(t *testing.T) {
@@ -675,9 +534,7 @@ func TestEmitter_ShutdownGraceExpiryRecordsQueuedRowsAsDropped(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	cfg := config.Emitter{
 		TableTTL:       "14d",
@@ -696,41 +553,31 @@ func TestEmitter_ShutdownGraceExpiryRecordsQueuedRowsAsDropped(t *testing.T) {
 	t.Cleanup(func() { close(w.release) })
 
 	e := newWithWriter(cfg, zap.NewNop(), m, w, time.Now)
-	if err := e.Start(t.Context(), noopHost{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	require.NoError(t, e.Start(t.Context(), noopHost{}), "Start")
 
-	if emitErr := e.Emit(context.Background(), sampleRows(1)); emitErr != nil {
-		t.Fatalf("Emit (in-flight): %v", emitErr)
-	}
+	require.NoError(t, e.Emit(context.Background(), sampleRows(1)), "Emit (in-flight)")
 
 	select {
 	case <-w.entered:
 	case <-time.After(time.Second):
-		t.Fatal("writer.Write was never called; cannot exercise stuck-write path")
+		require.FailNow(t, "writer.Write was never called; cannot exercise stuck-write path")
 	}
 
 	const queuedRows = 4
 	for range queuedRows {
-		if emitErr := e.Emit(context.Background(), sampleRows(1)); emitErr != nil {
-			t.Fatalf("Emit (queued): %v", emitErr)
-		}
+		require.NoError(t, e.Emit(context.Background(), sampleRows(1)), "Emit (queued)")
 	}
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer stopCancel()
 	stopErr := e.Shutdown(stopCtx)
-	if stopErr == nil {
-		t.Fatal("Shutdown returned nil when ctx expired; want ctx error")
-	}
-	if !errors.Is(stopErr, context.DeadlineExceeded) && !errors.Is(stopErr, context.Canceled) {
-		t.Fatalf("Shutdown error = %v; want context.DeadlineExceeded or context.Canceled", stopErr)
-	}
+	require.Error(t, stopErr, "Shutdown returned nil when ctx expired; want ctx error")
+	require.True(t, errors.Is(stopErr, context.DeadlineExceeded) || errors.Is(stopErr, context.Canceled),
+		"Shutdown error = %v; want context.DeadlineExceeded or context.Canceled", stopErr)
 
 	wantDropped := float64(1 + queuedRows)
-	if got := testutil.ToFloat64(m.emissionsFailed); got != wantDropped {
-		t.Fatalf("topology_emissions_failed_total = %v; want %v (1 in-flight + %d queued)", got, wantDropped, queuedRows)
-	}
+	require.InDelta(t, wantDropped, testutil.ToFloat64(m.emissionsFailed), 0,
+		"topology_emissions_failed_total (1 in-flight + %d queued)", queuedRows)
 }
 
 func TestEmitter_ShutdownWithPreCancelledCtxReturnsCtxErr(t *testing.T) {
@@ -738,26 +585,18 @@ func TestEmitter_ShutdownWithPreCancelledCtxReturnsCtxErr(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	w := &fakeWriter{}
 	e := newWithWriter(testEmitterConfig(), zap.NewNop(), m, w, fixedNow())
-	if err := e.Start(t.Context(), noopHost{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	require.NoError(t, e.Start(t.Context(), noopHost{}), "Start")
 
 	stopCtx, stopCancel := context.WithCancel(context.Background())
 	stopCancel()
 
 	stopErr := e.Shutdown(stopCtx)
-	if !errors.Is(stopErr, context.Canceled) {
-		t.Fatalf("Shutdown error = %v; want context.Canceled", stopErr)
-	}
-	if !w.closed {
-		t.Fatal("writer.Close was not called when Shutdown ran with pre-cancelled ctx")
-	}
+	require.ErrorIs(t, stopErr, context.Canceled, "Shutdown error")
+	require.True(t, w.closed, "writer.Close was not called when Shutdown ran with pre-cancelled ctx")
 }
 
 func TestEmitter_ShutdownAfterGraceExpiryIsIdempotent(t *testing.T) {
@@ -765,9 +604,7 @@ func TestEmitter_ShutdownAfterGraceExpiryIsIdempotent(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	cfg := config.Emitter{
 		TableTTL:       "14d",
@@ -786,52 +623,35 @@ func TestEmitter_ShutdownAfterGraceExpiryIsIdempotent(t *testing.T) {
 	t.Cleanup(func() { close(w.release) })
 
 	e := newWithWriter(cfg, zap.NewNop(), m, w, time.Now)
-	if err := e.Start(t.Context(), noopHost{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	require.NoError(t, e.Start(t.Context(), noopHost{}), "Start")
 
-	if emitErr := e.Emit(context.Background(), sampleRows(1)); emitErr != nil {
-		t.Fatalf("Emit: %v", emitErr)
-	}
+	require.NoError(t, e.Emit(context.Background(), sampleRows(1)), "Emit")
 	select {
 	case <-w.entered:
 	case <-time.After(time.Second):
-		t.Fatal("writer.Write was never called")
+		require.FailNow(t, "writer.Write was never called")
 	}
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer stopCancel()
-	if err := e.Shutdown(stopCtx); err == nil {
-		t.Fatal("first Shutdown returned nil; want ctx error")
-	}
+	require.Error(t, e.Shutdown(stopCtx), "first Shutdown returned nil; want ctx error")
 
 	dropsAfterFirst := testutil.ToFloat64(m.emissionsFailed)
 	writesAfterFirst := w.writeCalls.Load()
 	closesAfterFirst := w.closeCalls.Load()
-	if closesAfterFirst != 1 {
-		t.Fatalf("writer.Close calls after first Shutdown = %d; want 1", closesAfterFirst)
-	}
+	require.Equal(t, int32(1), closesAfterFirst, "writer.Close calls after first Shutdown")
 
-	if err := e.Shutdown(stopCtx); err != nil {
-		t.Fatalf("second Shutdown returned %v; want nil (idempotent)", err)
-	}
-	if got := testutil.ToFloat64(m.emissionsFailed); got != dropsAfterFirst {
-		t.Fatalf("emissionsFailed after second Shutdown = %v; want %v (no double-count)", got, dropsAfterFirst)
-	}
-	if got := w.writeCalls.Load(); got != writesAfterFirst {
-		t.Fatalf("writer.Write calls after second Shutdown = %d; want %d", got, writesAfterFirst)
-	}
-	if got := w.closeCalls.Load(); got != closesAfterFirst {
-		t.Fatalf("writer.Close calls after second Shutdown = %d; want %d (close exactly once)", got, closesAfterFirst)
-	}
+	require.NoError(t, e.Shutdown(stopCtx), "second Shutdown; want nil (idempotent)")
+	require.InDelta(t, dropsAfterFirst, testutil.ToFloat64(m.emissionsFailed), 0,
+		"emissionsFailed after second Shutdown (no double-count)")
+	require.Equal(t, writesAfterFirst, w.writeCalls.Load(), "writer.Write calls after second Shutdown")
+	require.Equal(t, closesAfterFirst, w.closeCalls.Load(), "writer.Close calls after second Shutdown (close exactly once)")
 }
 
 func TestEmitter_RetryReusesBatchTimestamp(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m, err := newMetrics(reg)
-	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
-	}
+	require.NoError(t, err, "newMetrics")
 
 	var calls atomic.Int32
 	base := time.Unix(1_700_000_000, 0)
@@ -850,15 +670,11 @@ func TestEmitter_RetryReusesBatchTimestamp(t *testing.T) {
 	e := newWithWriter(cfg, zap.NewNop(), m, writer, nowFn)
 	startEmitter(t, e)
 
-	if emitErr := e.Emit(context.Background(), sampleRows(2)); emitErr != nil {
-		t.Fatalf("Emit: %v", emitErr)
-	}
+	require.NoError(t, e.Emit(context.Background(), sampleRows(2)), "Emit")
 
 	waitForCalls(t, writer.callCh, 3)
 
-	if got := writer.batchCount(); got != 3 {
-		t.Fatalf("write attempts: got %d, want 3 (2 failed + 1 success)", got)
-	}
+	require.Equal(t, 3, writer.batchCount(), "write attempts (2 failed + 1 success)")
 
 	writer.mu.Lock()
 	batches := append([]writeBatch(nil), writer.batches...)
@@ -867,10 +683,7 @@ func TestEmitter_RetryReusesBatchTimestamp(t *testing.T) {
 	wantTS := batches[0].Rows[0].Timestamp
 	for i, b := range batches {
 		for j, r := range b.Rows {
-			if !r.Timestamp.Equal(wantTS) {
-				t.Fatalf("batches[%d].Rows[%d].Timestamp = %v, want %v",
-					i, j, r.Timestamp, wantTS)
-			}
+			require.WithinDuration(t, wantTS, r.Timestamp, 0, "batches[%d].Rows[%d].Timestamp", i, j)
 		}
 	}
 }

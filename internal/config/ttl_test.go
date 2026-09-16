@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestValidateTTL(t *testing.T) {
 	t.Parallel()
@@ -27,14 +31,10 @@ func TestValidateTTL(t *testing.T) {
 
 			err := validateTTL(tt.raw)
 			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
+				require.Error(t, err)
 				return
 			}
-			if err != nil {
-				t.Fatalf("validateTTL(%q): %v", tt.raw, err)
-			}
+			require.NoError(t, err, "validateTTL(%q)", tt.raw)
 		})
 	}
 }

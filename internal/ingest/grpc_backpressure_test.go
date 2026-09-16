@@ -7,6 +7,7 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"go.uber.org/zap"
@@ -44,16 +45,10 @@ func TestGRPCServer_BackpressureReturnsUnavailable(t *testing.T) {
 				},
 			}
 			_, err := client.Export(context.Background(), req)
-			if err == nil {
-				t.Fatalf("Export returned nil error; want %s", codes.Unavailable)
-			}
+			require.Error(t, err, "Export returned nil error; want %s", codes.Unavailable)
 			st, ok := status.FromError(err)
-			if !ok {
-				t.Fatalf("not a gRPC status: %v", err)
-			}
-			if st.Code() != codes.Unavailable {
-				t.Fatalf("gRPC code = %s, want %s", st.Code(), codes.Unavailable)
-			}
+			require.True(t, ok, "not a gRPC status: %v", err)
+			require.Equal(t, codes.Unavailable, st.Code())
 		})
 	}
 }
@@ -78,15 +73,9 @@ func TestGRPCServer_PermanentOnlyReturnsPartialSuccess(t *testing.T) {
 		},
 	}
 	resp, err := client.Export(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Export err: %v; want OK with PartialSuccess", err)
-	}
-	if resp.GetPartialSuccess() == nil {
-		t.Fatal("PartialSuccess is nil; want RejectedSpans=1")
-	}
-	if got := resp.GetPartialSuccess().GetRejectedSpans(); got != 1 {
-		t.Fatalf("RejectedSpans = %d, want 1", got)
-	}
+	require.NoError(t, err, "want OK with PartialSuccess")
+	require.NotNil(t, resp.GetPartialSuccess(), "want RejectedSpans=1")
+	require.Equal(t, int64(1), resp.GetPartialSuccess().GetRejectedSpans())
 }
 
 // TestGRPCServer_MixedRejectionsReturnsUnavailable locks in the response
@@ -120,14 +109,8 @@ func TestGRPCServer_MixedRejectionsReturnsUnavailable(t *testing.T) {
 		},
 	}
 	_, err := client.Export(context.Background(), req)
-	if err == nil {
-		t.Fatalf("Export returned nil error; want %s", codes.Unavailable)
-	}
+	require.Error(t, err, "Export returned nil error; want %s", codes.Unavailable)
 	st, ok := status.FromError(err)
-	if !ok {
-		t.Fatalf("not a gRPC status: %v", err)
-	}
-	if st.Code() != codes.Unavailable {
-		t.Fatalf("gRPC code = %s, want %s", st.Code(), codes.Unavailable)
-	}
+	require.True(t, ok, "not a gRPC status: %v", err)
+	require.Equal(t, codes.Unavailable, st.Code())
 }

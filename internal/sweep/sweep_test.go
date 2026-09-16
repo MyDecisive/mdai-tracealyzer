@@ -15,6 +15,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -118,9 +120,7 @@ func newSweeperForTest(t *testing.T, buf Buffer, c Computer, e Emitter) (*Sweepe
 		Interval:       10 * time.Millisecond,
 		WorkerPoolSize: 4,
 	}, nil, m, zap.NewNop())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoError(t, err, "New")
 	s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
 	return s, m
 }
@@ -145,21 +145,11 @@ func TestSweeper_EmptyScan_MarksOK(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 1 {
-		t.Fatalf("sweeps_total{ok}: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultScanError)); got != 0 {
-		t.Fatalf("sweeps_total{scan_error}: want 0, got %v", got)
-	}
-	if len(buf.drainCalls) != 0 {
-		t.Fatalf("no Drain calls expected, got %d", len(buf.drainCalls))
-	}
-	if got := comp.calls.Load(); got != 0 {
-		t.Fatalf("no Compute calls expected, got %d", got)
-	}
-	if em.callCount() != 0 {
-		t.Fatalf("no Emit calls expected, got %d", em.callCount())
-	}
+	require.InDelta(t, 1, testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)), 0, "sweeps_total{ok}")
+	require.InDelta(t, 0, testutil.ToFloat64(m.sweeps.WithLabelValues(resultScanError)), 0, "sweeps_total{scan_error}")
+	require.Empty(t, buf.drainCalls, "no Drain calls expected")
+	require.Zero(t, comp.calls.Load(), "no Compute calls expected")
+	require.Zero(t, em.callCount(), "no Emit calls expected")
 }
 
 func TestSweeper_MultiRootTrace_EmitsOneRowPerRoot(t *testing.T) {
@@ -185,26 +175,16 @@ func TestSweeper_MultiRootTrace_EmitsOneRowPerRoot(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.finalized); got != 1 {
-		t.Fatalf("finalized: want 1 (per trace), got %v", got)
-	}
-	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)); got != 1 {
-		t.Fatalf("trigger{quiet}: want 1, got %v", got)
-	}
-	if em.callCount() != 1 {
-		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
-	}
+	require.InDelta(t, 1, testutil.ToFloat64(m.finalized), 0, "finalized (per trace)")
+	require.InDelta(t, 1, testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)), 0, "trigger{quiet}")
+	require.Equal(t, 1, em.callCount(), "Emit calls")
 	rows := em.rowsIn(0)
-	if len(rows) != 2 {
-		t.Fatalf("emitted rows: want 2, got %d", len(rows))
-	}
+	require.Len(t, rows, 2, "emitted rows")
 	seen := map[string]bool{}
 	for _, r := range rows {
 		seen[r.RootService+"::"+r.RootOperation] = true
 	}
-	if !seen["svc-a::root-a"] || !seen["svc-b::root-b"] {
-		t.Fatalf("expected both roots in emitted batch, got %+v", rows)
-	}
+	require.True(t, seen["svc-a::root-a"] && seen["svc-b::root-b"], "expected both roots in emitted batch, got %+v", rows)
 }
 
 func TestSweeper_TwoFinalizable_BothEmittedInOneBatch(t *testing.T) {
@@ -232,24 +212,12 @@ func TestSweeper_TwoFinalizable_BothEmittedInOneBatch(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.finalized); got != 2 {
-		t.Fatalf("finalized: want 2, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)); got != 1 {
-		t.Fatalf("trigger{quiet}: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerMaxTTL)); got != 1 {
-		t.Fatalf("trigger{max_ttl}: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 1 {
-		t.Fatalf("sweeps{ok}: want 1, got %v", got)
-	}
-	if em.callCount() != 1 {
-		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
-	}
-	if rows := em.rowsIn(0); len(rows) != 2 {
-		t.Fatalf("emitted rows: want 2, got %d", len(rows))
-	}
+	require.InDelta(t, 2, testutil.ToFloat64(m.finalized), 0, "finalized")
+	require.InDelta(t, 1, testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)), 0, "trigger{quiet}")
+	require.InDelta(t, 1, testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerMaxTTL)), 0, "trigger{max_ttl}")
+	require.InDelta(t, 1, testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)), 0, "sweeps{ok}")
+	require.Equal(t, 1, em.callCount(), "Emit calls")
+	require.Len(t, em.rowsIn(0), 2, "emitted rows")
 }
 
 func TestSweeper_DrainErrorIsolatesFailure(t *testing.T) {
@@ -278,18 +246,12 @@ func TestSweeper_DrainErrorIsolatesFailure(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.drainErrors); got != 1 {
-		t.Fatalf("drain_errors: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)); got != 1 {
-		t.Fatalf("trigger{quiet}: want 1, got %v", got)
-	}
-	if em.callCount() != 1 {
-		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
-	}
-	if rows := em.rowsIn(0); len(rows) != 1 || rows[0].TraceID != "b" {
-		t.Fatalf("emitted rows: want [{b}], got %+v", rows)
-	}
+	require.InDelta(t, 1, testutil.ToFloat64(m.drainErrors), 0, "drain_errors")
+	require.InDelta(t, 1, testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)), 0, "trigger{quiet}")
+	require.Equal(t, 1, em.callCount(), "Emit calls")
+	rows := em.rowsIn(0)
+	require.Len(t, rows, 1, "emitted rows")
+	require.Equal(t, "b", rows[0].TraceID, "emitted rows")
 }
 
 func TestSweeper_NoRoot_IsExpectedSkip(t *testing.T) {
@@ -312,35 +274,19 @@ func TestSweeper_NoRoot_IsExpectedSkip(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.computeSkipped.WithLabelValues(reasonNoRoot)); got != 1 {
-		t.Fatalf("compute_skipped{no_root}: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.computeErrors); got != 0 {
-		t.Fatalf("compute_errors: want 0, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.orphanSpans); got != 3 {
-		t.Fatalf("orphan_spans: want 3, got %v", got)
-	}
-	if got := histogramCount(t, m.computeDuration); got != 1 {
-		t.Fatalf("compute_duration observations: want 1, got %d", got)
-	}
-	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerMaxTTL)); got != 0 {
-		t.Fatalf("trigger{max_ttl}: want 0, got %v", got)
-	}
-	if em.callCount() != 0 {
-		t.Fatalf("Emit calls: want 0, got %d", em.callCount())
-	}
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 1 {
-		t.Fatalf("sweeps{ok}: want 1, got %v", got)
-	}
+	require.InDelta(t, 1, testutil.ToFloat64(m.computeSkipped.WithLabelValues(reasonNoRoot)), 0, "compute_skipped{no_root}")
+	require.InDelta(t, 0, testutil.ToFloat64(m.computeErrors), 0, "compute_errors")
+	require.InDelta(t, 3, testutil.ToFloat64(m.orphanSpans), 0, "orphan_spans")
+	require.Equal(t, uint64(1), histogramCount(t, m.computeDuration), "compute_duration observations")
+	require.InDelta(t, 0, testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerMaxTTL)), 0, "trigger{max_ttl}")
+	require.Zero(t, em.callCount(), "Emit calls")
+	require.InDelta(t, 1, testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)), 0, "sweeps{ok}")
 }
 
 func histogramCount(t *testing.T, h prometheus.Histogram) uint64 {
 	t.Helper()
 	var mt dto.Metric
-	if err := h.Write(&mt); err != nil {
-		t.Fatalf("histogram Write: %v", err)
-	}
+	require.NoError(t, h.Write(&mt), "histogram Write")
 	return mt.GetHistogram().GetSampleCount()
 }
 
@@ -369,18 +315,12 @@ func TestSweeper_ComputeError_DropsRowTickOK(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.computeErrors); got != 1 {
-		t.Fatalf("compute_errors: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 1 {
-		t.Fatalf("sweeps{ok}: want 1, got %v", got)
-	}
-	if em.callCount() != 1 {
-		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
-	}
-	if rows := em.rowsIn(0); len(rows) != 1 || rows[0].TraceID != "b" {
-		t.Fatalf("emitted rows: want [{b}], got %+v", rows)
-	}
+	require.InDelta(t, 1, testutil.ToFloat64(m.computeErrors), 0, "compute_errors")
+	require.InDelta(t, 1, testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)), 0, "sweeps{ok}")
+	require.Equal(t, 1, em.callCount(), "Emit calls")
+	rows := em.rowsIn(0)
+	require.Len(t, rows, 1, "emitted rows")
+	require.Equal(t, "b", rows[0].TraceID, "emitted rows")
 }
 
 func TestSweeper_ScanError_StopsTick(t *testing.T) {
@@ -393,18 +333,10 @@ func TestSweeper_ScanError_StopsTick(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultScanError)); got != 1 {
-		t.Fatalf("sweeps{scan_error}: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 0 {
-		t.Fatalf("sweeps{ok}: want 0, got %v", got)
-	}
-	if len(buf.drainCalls) != 0 {
-		t.Fatalf("no Drain calls expected, got %d", len(buf.drainCalls))
-	}
-	if em.callCount() != 0 {
-		t.Fatalf("no Emit calls expected, got %d", em.callCount())
-	}
+	require.InDelta(t, 1, testutil.ToFloat64(m.sweeps.WithLabelValues(resultScanError)), 0, "sweeps{scan_error}")
+	require.InDelta(t, 0, testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)), 0, "sweeps{ok}")
+	require.Empty(t, buf.drainCalls, "no Drain calls expected")
+	require.Zero(t, em.callCount(), "no Emit calls expected")
 }
 
 func TestSweeper_EmitError_MarksEmitError(t *testing.T) {
@@ -427,15 +359,9 @@ func TestSweeper_EmitError_MarksEmitError(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultEmitError)); got != 1 {
-		t.Fatalf("sweeps{emit_error}: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 0 {
-		t.Fatalf("sweeps{ok}: want 0, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)); got != 1 {
-		t.Fatalf("trigger{quiet}: want 1, got %v", got)
-	}
+	require.InDelta(t, 1, testutil.ToFloat64(m.sweeps.WithLabelValues(resultEmitError)), 0, "sweeps{emit_error}")
+	require.InDelta(t, 0, testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)), 0, "sweeps{ok}")
+	require.InDelta(t, 1, testutil.ToFloat64(m.trigger.WithLabelValues(buffer.TriggerQuiet)), 0, "trigger{quiet}")
 }
 
 func TestSweeper_TickComputesCutoffsFromNow(t *testing.T) {
@@ -448,16 +374,13 @@ func TestSweeper_TickComputesCutoffsFromNow(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if buf.scanCalls != 1 {
-		t.Fatalf("Scan calls: want 1, got %d", buf.scanCalls)
-	}
+	require.Equal(t, 1, buf.scanCalls, "Scan calls")
 	now := s.now()
 	wantQuiet := now.Add(-s.cfg.QuietPeriod)
 	wantTTL := now.Add(-s.cfg.MaxTTL)
-	if got := buf.scanCutoffs[0]; !got.quiet.Equal(wantQuiet) || !got.ttl.Equal(wantTTL) {
-		t.Fatalf("cutoffs: want quiet=%v ttl=%v, got quiet=%v ttl=%v",
-			wantQuiet, wantTTL, got.quiet, got.ttl)
-	}
+	got := buf.scanCutoffs[0]
+	require.WithinDuration(t, wantQuiet, got.quiet, 0, "quiet cutoff")
+	require.WithinDuration(t, wantTTL, got.ttl, 0, "ttl cutoff")
 }
 
 // TestSweeper_FanoutRunsConcurrently verifies the worker pool drives
@@ -493,9 +416,7 @@ func TestSweeper_FanoutRunsConcurrently(t *testing.T) {
 		Interval:       10 * time.Millisecond,
 		WorkerPoolSize: pool,
 	}, nil, m, zap.NewNop())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoError(t, err, "New")
 
 	done := make(chan struct{})
 	go func() {
@@ -505,24 +426,18 @@ func TestSweeper_FanoutRunsConcurrently(t *testing.T) {
 
 	select {
 	case <-done:
-		t.Fatal("tick completed before all workers arrived at the gate — pool is not concurrent")
+		require.Fail(t, "tick completed before all workers arrived at the gate — pool is not concurrent")
 	case <-time.After(50 * time.Millisecond):
 	}
-	if got := arrivals.Load(); got != pool {
-		t.Fatalf("arrivals at gate: want %d, got %d", pool, got)
-	}
+	require.Equal(t, int32(pool), arrivals.Load(), "arrivals at gate")
 	close(gate)
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("tick did not complete after gate release")
+		require.Fail(t, "tick did not complete after gate release")
 	}
-	if em.callCount() != 1 {
-		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
-	}
-	if rows := em.rowsIn(0); len(rows) != pool {
-		t.Fatalf("emitted rows: want %d, got %d", pool, len(rows))
-	}
+	require.Equal(t, 1, em.callCount(), "Emit calls")
+	require.Len(t, em.rowsIn(0), pool, "emitted rows")
 }
 
 type gatingComputer struct {
@@ -551,18 +466,10 @@ func TestSweeper_Tick_CancelBeforeScan_IsBenignSkip(t *testing.T) {
 	cancel()
 	s.tick(ctx)
 
-	if len(buf.drainCalls) != 0 {
-		t.Fatalf("no Drain calls expected, got %d", len(buf.drainCalls))
-	}
-	if em.callCount() != 0 {
-		t.Fatalf("no Emit calls expected, got %d", em.callCount())
-	}
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultScanError)); got != 0 {
-		t.Fatalf("sweeps{scan_error}: want 0, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)); got != 0 {
-		t.Fatalf("sweeps{ok}: want 0, got %v", got)
-	}
+	require.Empty(t, buf.drainCalls, "no Drain calls expected")
+	require.Zero(t, em.callCount(), "no Emit calls expected")
+	require.InDelta(t, 0, testutil.ToFloat64(m.sweeps.WithLabelValues(resultScanError)), 0, "sweeps{scan_error}")
+	require.InDelta(t, 0, testutil.ToFloat64(m.sweeps.WithLabelValues(resultOK)), 0, "sweeps{ok}")
 }
 
 func TestSweeper_StartIsNonBlockingShutdownHalts(t *testing.T) {
@@ -573,12 +480,8 @@ func TestSweeper_StartIsNonBlockingShutdownHalts(t *testing.T) {
 	em := &fakeEmitter{}
 	s, _ := newSweeperForTest(t, buf, comp, em)
 
-	if err := s.Start(t.Context(), noopHost{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := s.Shutdown(context.Background()); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
+	require.NoError(t, s.Start(t.Context(), noopHost{}), "Start")
+	require.NoError(t, s.Shutdown(context.Background()), "Shutdown")
 }
 
 func TestSweeper_DoesNotDrainBeforeReadinessGate(t *testing.T) {
@@ -601,27 +504,17 @@ func TestSweeper_DoesNotDrainBeforeReadinessGate(t *testing.T) {
 			Interval:       time.Millisecond,
 			WorkerPoolSize: 1,
 		}, gate, NewMetrics(reg), zap.NewNop())
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
+		require.NoError(t, err, "New")
 		s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
 
-		if err := s.Start(t.Context(), noopHost{}); err != nil {
-			t.Fatalf("Start: %v", err)
-		}
+		require.NoError(t, s.Start(t.Context(), noopHost{}), "Start")
 		// Advance the fake clock past several intervals; the ticker only fires
 		// once run() has passed the gate, so nothing must be scanned.
 		time.Sleep(10 * time.Millisecond)
 		synctest.Wait()
-		if got := buf.scanCalls; got != 0 {
-			t.Errorf("Scan must not run before gate fires: got %d calls", got)
-		}
-		if got := len(buf.drainCalls); got != 0 {
-			t.Errorf("Drain must not run before gate fires: got %d calls", got)
-		}
-		if err := s.Shutdown(context.Background()); err != nil {
-			t.Fatalf("Shutdown: %v", err)
-		}
+		assert.Zero(t, buf.scanCalls, "Scan must not run before gate fires")
+		assert.Empty(t, buf.drainCalls, "Drain must not run before gate fires")
+		require.NoError(t, s.Shutdown(context.Background()), "Shutdown")
 	})
 }
 
@@ -651,21 +544,17 @@ func TestSweeper_ClaimedTraceCompletesAcrossShutdown(t *testing.T) {
 			Interval:       time.Millisecond,
 			WorkerPoolSize: 1,
 		}, gate, NewMetrics(reg), zap.NewNop())
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
+		require.NoError(t, err, "New")
 		s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
 
-		if err := s.Start(t.Context(), noopHost{}); err != nil {
-			t.Fatalf("Start: %v", err)
-		}
+		require.NoError(t, s.Start(t.Context(), noopHost{}), "Start")
 
 		// Deadlines are fake-time; the ticker keeps advancing the clock, so a
 		// stuck sweeper fails here instead of spinning until the test timeout.
 		select {
 		case <-drainEntered: // clock auto-advances to the first tick; Drain blocks
 		case <-time.After(time.Second):
-			t.Fatal("Drain never entered")
+			require.Fail(t, "Drain never entered")
 		}
 
 		shutdownDone := make(chan error, 1)
@@ -675,7 +564,7 @@ func TestSweeper_ClaimedTraceCompletesAcrossShutdown(t *testing.T) {
 		synctest.Wait()
 		select {
 		case err := <-shutdownDone:
-			t.Fatalf("Shutdown returned while Drain was still in flight: %v", err)
+			require.Fail(t, "Shutdown returned while Drain was still in flight", "err: %v", err)
 		default:
 		}
 
@@ -683,15 +572,11 @@ func TestSweeper_ClaimedTraceCompletesAcrossShutdown(t *testing.T) {
 
 		select {
 		case err := <-shutdownDone:
-			if err != nil {
-				t.Fatalf("Shutdown: %v", err)
-			}
+			require.NoError(t, err, "Shutdown")
 		case <-time.After(time.Second):
-			t.Fatal("Shutdown did not return after Drain released")
+			require.Fail(t, "Shutdown did not return after Drain released")
 		}
-		if got := em.callCount(); got != 1 {
-			t.Fatalf("Emit calls: want 1 (the claimed trace's row), got %d", got)
-		}
+		require.Equal(t, 1, em.callCount(), "Emit calls (the claimed trace's row)")
 	})
 }
 
@@ -722,19 +607,15 @@ func TestSweeper_UnclaimedTracesLeftInValkeyAcrossShutdown(t *testing.T) {
 			Interval:       time.Millisecond,
 			WorkerPoolSize: 1,
 		}, gate, NewMetrics(reg), zap.NewNop())
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
+		require.NoError(t, err, "New")
 		s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
 
-		if err := s.Start(t.Context(), noopHost{}); err != nil {
-			t.Fatalf("Start: %v", err)
-		}
+		require.NoError(t, s.Start(t.Context(), noopHost{}), "Start")
 
 		select {
 		case <-drainEntered:
 		case <-time.After(time.Second):
-			t.Fatal("Drain never entered")
+			require.Fail(t, "Drain never entered")
 		}
 
 		shutdownDone := make(chan error, 1)
@@ -747,15 +628,11 @@ func TestSweeper_UnclaimedTracesLeftInValkeyAcrossShutdown(t *testing.T) {
 
 		select {
 		case err := <-shutdownDone:
-			if err != nil {
-				t.Fatalf("Shutdown: %v", err)
-			}
+			require.NoError(t, err, "Shutdown")
 		case <-time.After(time.Second):
-			t.Fatal("Shutdown did not return")
+			require.Fail(t, "Shutdown did not return")
 		}
-		if got := len(buf.drainCalls); got != 1 {
-			t.Errorf("only the claimed trace must be drained: got %d Drain calls", got)
-		}
+		assert.Len(t, buf.drainCalls, 1, "only the claimed trace must be drained")
 	})
 }
 
@@ -794,9 +671,7 @@ func TestNewMetrics_NilRegisterer(t *testing.T) {
 	t.Parallel()
 
 	m := NewMetrics(nil)
-	if m != nil {
-		t.Fatalf("NewMetrics(nil): want nil, got %+v", m)
-	}
+	require.Nil(t, m, "NewMetrics(nil)")
 	m.incSweep(resultOK)
 	m.incFinalized(buffer.TriggerQuiet)
 	m.incDrainError()
@@ -862,9 +737,7 @@ func TestOrphanBytes_TotalMinusAttributed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := orphanBytes(tc.spans, tc.rows); got != tc.want {
-				t.Fatalf("orphanBytes: want %d, got %d", tc.want, got)
-			}
+			require.Equal(t, tc.want, orphanBytes(tc.spans, tc.rows), "orphanBytes")
 		})
 	}
 }
@@ -892,18 +765,10 @@ func TestSweeper_AllOrphan_BytesGoToOrphanMetricNotRow(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.computeSkipped.WithLabelValues(reasonNoRoot)); got != 1 {
-		t.Fatalf("compute_skipped{no_root}: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.orphanSpans); got != 2 {
-		t.Fatalf("orphan_spans: want 2, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.orphanBytes); got != 550 {
-		t.Fatalf("orphan_bytes: want 550 (200+350), got %v", got)
-	}
-	if em.callCount() != 0 {
-		t.Fatalf("Emit calls: want 0 on ErrNoRoot, got %d", em.callCount())
-	}
+	require.InDelta(t, 1, testutil.ToFloat64(m.computeSkipped.WithLabelValues(reasonNoRoot)), 0, "compute_skipped{no_root}")
+	require.InDelta(t, 2, testutil.ToFloat64(m.orphanSpans), 0, "orphan_spans")
+	require.InDelta(t, 550, testutil.ToFloat64(m.orphanBytes), 0, "orphan_bytes (200+350)")
+	require.Zero(t, em.callCount(), "Emit calls on ErrNoRoot")
 }
 
 func TestSweeper_PartialOrphan_BytesAccountedAtMetric(t *testing.T) {
@@ -935,18 +800,12 @@ func TestSweeper_PartialOrphan_BytesAccountedAtMetric(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.orphanSpans); got != 1 {
-		t.Fatalf("orphan_spans: want 1, got %v", got)
-	}
-	if got := testutil.ToFloat64(m.orphanBytes); got != 75 {
-		t.Fatalf("orphan_bytes: want 75 (375-300), got %v", got)
-	}
-	if em.callCount() != 1 {
-		t.Fatalf("Emit calls: want 1, got %d", em.callCount())
-	}
-	if rows := em.rowsIn(0); len(rows) != 1 || rows[0].SpanBytesTotal != 300 {
-		t.Fatalf("emitted rows: want 1 row with SpanBytesTotal=300, got %+v", rows)
-	}
+	require.InDelta(t, 1, testutil.ToFloat64(m.orphanSpans), 0, "orphan_spans")
+	require.InDelta(t, 75, testutil.ToFloat64(m.orphanBytes), 0, "orphan_bytes (375-300)")
+	require.Equal(t, 1, em.callCount(), "Emit calls")
+	rows := em.rowsIn(0)
+	require.Len(t, rows, 1, "emitted rows")
+	require.Equal(t, int64(300), rows[0].SpanBytesTotal, "emitted row SpanBytesTotal")
 }
 
 func TestNew_ValidatesInputs(t *testing.T) {
@@ -979,9 +838,8 @@ func TestNew_ValidatesInputs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			m := NewMetrics(prometheus.NewRegistry())
-			if _, err := New(tc.buf, tc.c, tc.e, tc.cfg, nil, m, tc.log); err == nil {
-				t.Fatal("want error, got nil")
-			}
+			_, err := New(tc.buf, tc.c, tc.e, tc.cfg, nil, m, tc.log)
+			require.Error(t, err)
 		})
 	}
 }
@@ -1011,9 +869,7 @@ func TestSweeper_RootIDCollision_CountsMergedRows(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.rootIDCollisions); got != 2 {
-		t.Fatalf("root_id_collisions_total: want 2 (4 rows, 2 distinct RootIDs), got %v", got)
-	}
+	require.InDelta(t, 2, testutil.ToFloat64(m.rootIDCollisions), 0, "root_id_collisions_total (4 rows, 2 distinct RootIDs)")
 }
 
 func TestSweeper_NoRootIDCollision_LeavesCounterZero(t *testing.T) {
@@ -1039,7 +895,5 @@ func TestSweeper_NoRootIDCollision_LeavesCounterZero(t *testing.T) {
 
 	s.tick(context.Background())
 
-	if got := testutil.ToFloat64(m.rootIDCollisions); got != 0 {
-		t.Fatalf("root_id_collisions_total: want 0, got %v", got)
-	}
+	require.InDelta(t, 0, testutil.ToFloat64(m.rootIDCollisions), 0, "root_id_collisions_total")
 }

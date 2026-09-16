@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +14,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/mock"
 	"go.uber.org/mock/gomock"
@@ -25,12 +26,8 @@ import (
 func TestClassifyPutError_NonValkeyErrorIsBackendError(t *testing.T) {
 	t.Parallel()
 
-	if got := classifyPutError(errors.New("connection reset")); got != ReasonBackendError {
-		t.Errorf("connection reset: got %q, want %q", got, ReasonBackendError)
-	}
-	if got := classifyPutError(context.Canceled); got != ReasonBackendError {
-		t.Errorf("ctx canceled: got %q, want %q", got, ReasonBackendError)
-	}
+	assert.Equal(t, ReasonBackendError, classifyPutError(errors.New("connection reset")))
+	assert.Equal(t, ReasonBackendError, classifyPutError(context.Canceled))
 }
 
 func TestMergeFinalizable_MaxTTLWinsOverQuiet(t *testing.T) {
@@ -46,23 +43,15 @@ func TestMergeFinalizable_MaxTTLWinsOverQuiet(t *testing.T) {
 		zap.NewNop(),
 	)
 
-	if len(got) != 3 {
-		t.Fatalf("len: want 3, got %d", len(got))
-	}
+	require.Len(t, got, 3)
 
 	triggerByHex := make(map[string]string, len(got))
 	for _, f := range got {
 		triggerByHex[traceIDHex(f.TraceID)] = f.Trigger
 	}
-	if triggerByHex[both] != TriggerMaxTTL {
-		t.Errorf("both: want max_ttl, got %q", triggerByHex[both])
-	}
-	if triggerByHex[onlyTTL] != TriggerMaxTTL {
-		t.Errorf("onlyTTL: want max_ttl, got %q", triggerByHex[onlyTTL])
-	}
-	if triggerByHex[onlyQuiet] != TriggerQuiet {
-		t.Errorf("onlyQuiet: want quiet, got %q", triggerByHex[onlyQuiet])
-	}
+	assert.Equal(t, TriggerMaxTTL, triggerByHex[both], "both")
+	assert.Equal(t, TriggerMaxTTL, triggerByHex[onlyTTL], "onlyTTL")
+	assert.Equal(t, TriggerQuiet, triggerByHex[onlyQuiet], "onlyQuiet")
 }
 
 func TestMergeFinalizable_SkipsMalformedHex(t *testing.T) {
@@ -75,24 +64,16 @@ func TestMergeFinalizable_SkipsMalformedHex(t *testing.T) {
 		zap.NewNop(),
 	)
 
-	if len(got) != 1 {
-		t.Fatalf("len: want 1, got %d (%+v)", len(got), got)
-	}
-	if traceIDHex(got[0].TraceID) != valid {
-		t.Errorf("trace: got %x", got[0].TraceID)
-	}
-	if got[0].Trigger != TriggerQuiet {
-		t.Errorf("trigger: want quiet, got %q", got[0].Trigger)
-	}
+	require.Len(t, got, 1)
+	assert.Equal(t, valid, traceIDHex(got[0].TraceID))
+	assert.Equal(t, TriggerQuiet, got[0].Trigger)
 }
 
 func TestMergeFinalizable_Empty(t *testing.T) {
 	t.Parallel()
 
 	got := mergeFinalizable(nil, nil, zap.NewNop())
-	if len(got) != 0 {
-		t.Fatalf("want empty, got %+v", got)
-	}
+	require.Empty(t, got)
 }
 
 func TestNewValkeyBuffer_Validation(t *testing.T) {
@@ -102,34 +83,26 @@ func TestNewValkeyBuffer_Validation(t *testing.T) {
 
 	t.Run("empty addr", func(t *testing.T) {
 		t.Parallel()
-		if _, err := NewValkeyBuffer(t.Context(), ValkeyOptions{MaxTTL: time.Minute, OperationTimeout: time.Second, Logger: logger}); err == nil ||
-			!strings.Contains(err.Error(), "addr is required") {
-			t.Errorf("want 'addr is required', got %v", err)
-		}
+		_, err := NewValkeyBuffer(t.Context(), ValkeyOptions{MaxTTL: time.Minute, OperationTimeout: time.Second, Logger: logger})
+		require.ErrorContains(t, err, "addr is required")
 	})
 
 	t.Run("zero max_ttl", func(t *testing.T) {
 		t.Parallel()
-		if _, err := NewValkeyBuffer(t.Context(), ValkeyOptions{Addr: "127.0.0.1:6379", OperationTimeout: time.Second, Logger: logger}); err == nil ||
-			!strings.Contains(err.Error(), "max_ttl must be > 0") {
-			t.Errorf("want 'max_ttl must be > 0', got %v", err)
-		}
+		_, err := NewValkeyBuffer(t.Context(), ValkeyOptions{Addr: "127.0.0.1:6379", OperationTimeout: time.Second, Logger: logger})
+		require.ErrorContains(t, err, "max_ttl must be > 0")
 	})
 
 	t.Run("zero operation_timeout", func(t *testing.T) {
 		t.Parallel()
-		if _, err := NewValkeyBuffer(t.Context(), ValkeyOptions{Addr: "127.0.0.1:6379", MaxTTL: time.Minute, Logger: logger}); err == nil ||
-			!strings.Contains(err.Error(), "operation_timeout must be > 0") {
-			t.Errorf("want 'operation_timeout must be > 0', got %v", err)
-		}
+		_, err := NewValkeyBuffer(t.Context(), ValkeyOptions{Addr: "127.0.0.1:6379", MaxTTL: time.Minute, Logger: logger})
+		require.ErrorContains(t, err, "operation_timeout must be > 0")
 	})
 
 	t.Run("nil logger", func(t *testing.T) {
 		t.Parallel()
-		if _, err := NewValkeyBuffer(t.Context(), ValkeyOptions{Addr: "127.0.0.1:6379", MaxTTL: time.Minute, OperationTimeout: time.Second}); err == nil ||
-			!strings.Contains(err.Error(), "logger is required") {
-			t.Errorf("want 'logger is required', got %v", err)
-		}
+		_, err := NewValkeyBuffer(t.Context(), ValkeyOptions{Addr: "127.0.0.1:6379", MaxTTL: time.Minute, OperationTimeout: time.Second})
+		require.ErrorContains(t, err, "logger is required")
 	})
 }
 
@@ -140,13 +113,9 @@ func unreachableAddr(t *testing.T) string {
 	t.Helper()
 	var lc net.ListenConfig
 	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	addr := l.Addr().String()
-	if err := l.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
+	require.NoError(t, l.Close(), "close listener")
 	return addr
 }
 
@@ -163,32 +132,17 @@ func TestNewValkeyBuffer_DialRetriesUntilCtxDone(t *testing.T) {
 		OperationTimeout: time.Second,
 		Logger:           zap.New(core),
 	})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "valkey client") {
-		t.Errorf("want 'valkey client' wrap, got %v", err)
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("want DeadlineExceeded, got %v", err)
-	}
-	if logs.FilterMessage("valkey dial failed, retrying").Len() == 0 {
-		t.Error("expected at least one retry warn log")
-	}
+	require.ErrorContains(t, err, "valkey client")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Positive(t, logs.FilterMessage("valkey dial failed, retrying").Len(), "expected at least one retry warn log")
 }
 
 func TestSentinelFor(t *testing.T) {
 	t.Parallel()
 
-	if !errors.Is(sentinelFor(ReasonOverflow), ErrBufferFull) {
-		t.Errorf("overflow: want ErrBufferFull, got %v", sentinelFor(ReasonOverflow))
-	}
-	if !errors.Is(sentinelFor(ReasonBackendError), ErrBackendUnavailable) {
-		t.Errorf("backend: want ErrBackendUnavailable, got %v", sentinelFor(ReasonBackendError))
-	}
-	if !errors.Is(sentinelFor("anything-else"), ErrBackendUnavailable) {
-		t.Errorf("default: want ErrBackendUnavailable, got %v", sentinelFor("anything-else"))
-	}
+	require.ErrorIs(t, sentinelFor(ReasonOverflow), ErrBufferFull)
+	require.ErrorIs(t, sentinelFor(ReasonBackendError), ErrBackendUnavailable)
+	require.ErrorIs(t, sentinelFor("anything-else"), ErrBackendUnavailable, "default")
 }
 
 func TestPut_HappyPath(t *testing.T) {
@@ -197,9 +151,7 @@ func TestPut_HappyPath(t *testing.T) {
 	m.client.EXPECT().
 		DoMulti(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(putReply(mock.Result(mock.ValkeyString("OK"))))
-	if err := m.buf.Put(t.Context(), sampleSpan(1)); err != nil {
-		t.Errorf("Put: %v", err)
-	}
+	require.NoError(t, m.buf.Put(t.Context(), sampleSpan(1)))
 }
 
 func TestPut_BackendError(t *testing.T) {
@@ -210,12 +162,8 @@ func TestPut_BackendError(t *testing.T) {
 		Return(putReply(mock.ErrorResult(errors.New("connection reset"))))
 
 	err := m.buf.Put(t.Context(), sampleSpan(2))
-	if !errors.Is(err, ErrBackendUnavailable) {
-		t.Errorf("want ErrBackendUnavailable, got %v", err)
-	}
-	if got := counterValue(t, m.reg, "topology_buffer_rejected_total", "reason", "backend_error"); got != 1 {
-		t.Errorf("rejected backend_error: want 1, got %v", got)
-	}
+	require.ErrorIs(t, err, ErrBackendUnavailable)
+	assert.InDelta(t, 1, counterValue(t, m.reg, "topology_buffer_rejected_total", "reason", "backend_error"), 0)
 }
 
 // TestPut_OOM hits classifyPutError's OOM branch without a real Valkey.
@@ -229,12 +177,8 @@ func TestPut_OOM(t *testing.T) {
 		Return(putReply(mock.Result(mock.ValkeyError("OOM command not allowed when used memory > 'maxmemory'."))))
 
 	err := m.buf.Put(t.Context(), sampleSpan(3))
-	if !errors.Is(err, ErrBufferFull) {
-		t.Errorf("want ErrBufferFull, got %v", err)
-	}
-	if got := counterValue(t, m.reg, "topology_buffer_rejected_total", "reason", "overflow"); got != 1 {
-		t.Errorf("rejected overflow: want 1, got %v", got)
-	}
+	require.ErrorIs(t, err, ErrBufferFull)
+	assert.InDelta(t, 1, counterValue(t, m.reg, "topology_buffer_rejected_total", "reason", "overflow"), 0)
 }
 
 func TestScan_HappyPath(t *testing.T) {
@@ -252,23 +196,15 @@ func TestScan_HappyPath(t *testing.T) {
 
 	now := time.Now()
 	got, err := m.buf.Scan(t.Context(), now, now)
-	if err != nil {
-		t.Fatalf("Scan: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("len: want 2, got %d", len(got))
-	}
+	require.NoError(t, err)
+	require.Len(t, got, 2)
 
 	byHex := map[string]string{}
 	for _, f := range got {
 		byHex[traceIDHex(f.TraceID)] = f.Trigger
 	}
-	if byHex[traceQuietOnly] != TriggerQuiet {
-		t.Errorf("quiet-only trigger: want quiet, got %q", byHex[traceQuietOnly])
-	}
-	if byHex[traceTTL] != TriggerMaxTTL {
-		t.Errorf("ttl trigger: want max_ttl, got %q", byHex[traceTTL])
-	}
+	assert.Equal(t, TriggerQuiet, byHex[traceQuietOnly], "quiet-only trigger")
+	assert.Equal(t, TriggerMaxTTL, byHex[traceTTL], "ttl trigger")
 }
 
 func TestScan_Errors(t *testing.T) {
@@ -293,9 +229,7 @@ func TestScan_Errors(t *testing.T) {
 			m.client.EXPECT().DoMulti(gomock.Any(), gomock.Any(), gomock.Any()).Return(results)
 
 			_, err := m.buf.Scan(t.Context(), time.Now(), time.Now())
-			if err == nil || !strings.Contains(err.Error(), tc.wrap) {
-				t.Errorf("want %q wrap, got %v", tc.wrap, err)
-			}
+			require.ErrorContains(t, err, tc.wrap)
 		})
 	}
 }
@@ -314,9 +248,7 @@ func TestDrain_HappyPath(t *testing.T) {
 		EndTimeNs:   2,
 	}
 	encoded, err := encodeRecord(record)
-	if err != nil {
-		t.Fatalf("encodeRecord: %v", err)
-	}
+	require.NoError(t, err)
 	spanHex := spanIDHex(record.SpanID)
 
 	dedMock.EXPECT().DoMulti(
@@ -331,15 +263,9 @@ func TestDrain_HappyPath(t *testing.T) {
 	)))
 
 	got, err := m.buf.Drain(t.Context(), record.TraceID)
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("len: want 1, got %d", len(got))
-	}
-	if got[spanHex].Name != "op" {
-		t.Errorf("decoded name: got %q, want op", got[spanHex].Name)
-	}
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "op", got[spanHex].Name)
 }
 
 func TestDrain_DecodeError_IncrementsCounter(t *testing.T) {
@@ -349,9 +275,7 @@ func TestDrain_DecodeError_IncrementsCounter(t *testing.T) {
 
 	validRecord := SpanRecord{SpanID: [8]byte{9}, Name: "ok"}
 	encoded, err := encodeRecord(validRecord)
-	if err != nil {
-		t.Fatalf("encodeRecord: %v", err)
-	}
+	require.NoError(t, err)
 
 	dedMock.EXPECT().DoMulti(
 		gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
@@ -367,15 +291,9 @@ func TestDrain_DecodeError_IncrementsCounter(t *testing.T) {
 
 	var tid [16]byte
 	got, err := m.buf.Drain(t.Context(), tid)
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
-	}
-	if len(got) != 1 {
-		t.Errorf("decoded records: want 1, got %d", len(got))
-	}
-	if v := testutil.ToFloat64(m.decode); v != 1 {
-		t.Errorf("decode counter: want 1, got %v", v)
-	}
+	require.NoError(t, err)
+	assert.Len(t, got, 1, "decoded records")
+	assert.InDelta(t, 1, testutil.ToFloat64(m.decode), 0, "decode counter")
 }
 
 func TestDrain_ExecError(t *testing.T) {
@@ -395,10 +313,8 @@ func TestDrain_ExecError(t *testing.T) {
 	})
 
 	var tid [16]byte
-	if _, err := m.buf.Drain(t.Context(), tid); err == nil ||
-		!strings.Contains(err.Error(), "valkey drain exec") {
-		t.Errorf("want 'valkey drain exec' wrap, got %v", err)
-	}
+	_, err := m.buf.Drain(t.Context(), tid)
+	require.ErrorContains(t, err, "valkey drain exec")
 }
 
 func TestDrain_EmptyTrace(t *testing.T) {
@@ -419,15 +335,9 @@ func TestDrain_EmptyTrace(t *testing.T) {
 
 	var tid [16]byte
 	got, err := m.buf.Drain(t.Context(), tid)
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("want empty map, got %+v", got)
-	}
-	if n := logs.FilterMessage("drain: trace already absent").Len(); n != 1 {
-		t.Errorf("want 1 debug log for empty drain, got %d (all: %v)", n, logs.All())
-	}
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 1, logs.FilterMessage("drain: trace already absent").Len(), "debug log for empty drain (all: %v)", logs.All())
 }
 
 func TestClose(t *testing.T) {
@@ -461,15 +371,12 @@ func TestDrain_AtomicAgainstConcurrentPut(t *testing.T) {
 		OperationTimeout: 5 * time.Second,
 		Logger:           zap.NewNop(),
 	})
-	if err != nil {
-		t.Fatalf("NewValkeyBuffer: %v", err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(buf.Close)
 
 	var traceID [16]byte
-	if _, randErr := rand.Read(traceID[:]); randErr != nil {
-		t.Fatalf("rand trace id: %v", randErr)
-	}
+	_, err = rand.Read(traceID[:])
+	require.NoError(t, err, "rand trace id")
 
 	// Seed a handful of spans so Drain has non-trivial work.
 	seed := uint32(32)
@@ -489,9 +396,7 @@ func TestDrain_AtomicAgainstConcurrentPut(t *testing.T) {
 		}
 	}
 	for i := range seed {
-		if putErr := buf.Put(ctx, putSpan(i)); putErr != nil {
-			t.Fatalf("seed Put %d: %v", i, putErr)
-		}
+		require.NoError(t, buf.Put(ctx, putSpan(i)), "seed Put %d", i)
 	}
 
 	// Hammer Put on the same trace from another goroutine while Drain runs.
@@ -508,8 +413,7 @@ func TestDrain_AtomicAgainstConcurrentPut(t *testing.T) {
 			default:
 			}
 			next := putCount.Add(1) - 1
-			if putErr := buf.Put(ctx, putSpan(next)); putErr != nil {
-				t.Errorf("concurrent Put %d: %v", next, putErr)
+			if !assert.NoError(t, buf.Put(ctx, putSpan(next)), "concurrent Put %d", next) {
 				return
 			}
 		}
@@ -518,21 +422,15 @@ func TestDrain_AtomicAgainstConcurrentPut(t *testing.T) {
 	// Let the writer get going, then drain.
 	time.Sleep(5 * time.Millisecond)
 	drained, err := buf.Drain(ctx, traceID)
-	if err != nil {
-		close(stop)
-		wg.Wait()
-		t.Fatalf("Drain: %v", err)
-	}
 	close(stop)
 	wg.Wait()
+	require.NoError(t, err, "Drain")
 
 	// Anything not returned by Drain must still be in the buffer. Re-fetch
 	// whatever remains by doing a second Drain — with atomicity, all late
 	// Puts land after the first Drain's EXEC, so they end up in the second.
 	remaining, err := buf.Drain(ctx, traceID)
-	if err != nil {
-		t.Fatalf("second Drain: %v", err)
-	}
+	require.NoError(t, err, "second Drain")
 
 	total := len(drained) + len(remaining)
 	produced := putCount.Load()
@@ -552,7 +450,7 @@ func TestDrain_AtomicAgainstConcurrentPut(t *testing.T) {
 				missing++
 			}
 		}
-		t.Fatalf("spans lost: produced=%d, drained=%d, remaining=%d, missing=%d",
+		require.Failf(t, "spans lost", "produced=%d, drained=%d, remaining=%d, missing=%d",
 			produced, len(drained), len(remaining), missing)
 	}
 }
@@ -634,13 +532,9 @@ func sampleSpan(seed byte) SpanRecord {
 
 func counterValue(t *testing.T, reg *prometheus.Registry, name string, labelKV ...string) float64 {
 	t.Helper()
-	if len(labelKV)%2 != 0 {
-		t.Fatalf("counterValue: odd labelKV length %d", len(labelKV))
-	}
+	require.Zero(t, len(labelKV)%2, "counterValue: odd labelKV length %d", len(labelKV))
 	families, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("Gather: %v", err)
-	}
+	require.NoError(t, err, "Gather")
 	for _, f := range families {
 		if f.GetName() != name {
 			continue
@@ -652,7 +546,7 @@ func counterValue(t *testing.T, reg *prometheus.Registry, name string, labelKV .
 			return metric.GetCounter().GetValue()
 		}
 	}
-	t.Fatalf("metric %q with labels %v not in registry", name, labelKV)
+	require.Failf(t, "metric not in registry", "%q with labels %v", name, labelKV)
 	return 0
 }
 
