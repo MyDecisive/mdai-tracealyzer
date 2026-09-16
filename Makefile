@@ -11,13 +11,13 @@ NAMESPACE         ?= mdai
 DEMO_NAMESPACE    ?= test-stand-demo
 
 # Build / release.
-DOCKER_TAG        ?= 0.1.2
+DOCKER_TAG        ?= 0.1.4
 BUILD_PLATFORMS   ?= linux/arm64,linux/amd64
 GOTOOLCHAIN       ?= go1.27.1
 LOCAL_VALUES      ?= deployment/values-local.yaml
 CHART_VERSION     ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
 ifeq ($(CHART_VERSION),)
-CHART_VERSION := 0.1.2
+CHART_VERSION := 0.1.4
 endif
 
 # Mode A sample collector. Apply path is `kubectl apply -k samples/`; to

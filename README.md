@@ -187,7 +187,7 @@ Manifests for deploying the upstream collector live under `samples/`; the Helm c
 The cluster contract once the service exists:
 
 - Container ports: `4317` (OTLP gRPC), `4318` (OTLP HTTP), `9090` (Prometheus scrape + health probes).
-- pprof: `/debug/pprof` on `service.pprof_endpoint`, default `127.0.0.1:6060`. Loopback only and absent from the Service, so it is reachable through `kubectl port-forward` and nothing else; an empty value disables it.
+- pprof: `/debug/pprof` on `service.pprof_endpoint`, default `127.0.0.1:6060`. The endpoint is unauthenticated and the bind address is not validated, so keep it on loopback; with the default it is absent from the Service and reachable only through `kubectl port-forward`. An empty value disables it.
 - Readiness probe: `/healthz/ready` on `9090`; liveness probe: `/healthz/live` on `9090`. In v1 `/healthz/live` returns 200 unconditionally — deadlock detection is deferred.
 - Configuration: ConfigMap for the YAML; Secrets for env-only values.
 - `terminationGracePeriodSeconds` must be `≥ service.shutdown_grace` so the drain completes before SIGKILL.

@@ -74,8 +74,8 @@ type Emitter struct {
 type Service struct {
 	LogLevel        string   `envconfig:"LOG_LEVEL"        yaml:"log_level"`
 	MetricsEndpoint string   `envconfig:"METRICS_ENDPOINT" yaml:"metrics_endpoint"`
-	PprofEndpoint   string   `envconfig:"PPROF_ENDPOINT" yaml:"pprof_endpoint"`
-	ShutdownGrace   Duration `envconfig:"SHUTDOWN_GRACE" yaml:"shutdown_grace"`
+	PprofEndpoint   string   `envconfig:"PPROF_ENDPOINT"   yaml:"pprof_endpoint"`
+	ShutdownGrace   Duration `envconfig:"SHUTDOWN_GRACE"   yaml:"shutdown_grace"`
 }
 
 // Load reads the YAML file at path (if non-empty), then applies
