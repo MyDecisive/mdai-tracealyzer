@@ -12,6 +12,8 @@ import (
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"go.uber.org/zap"
@@ -69,23 +71,13 @@ func TestGRPCServer_Export_StoresNormalizedRecords(t *testing.T) {
 		},
 	}
 	resp, err := client.Export(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Export: %v", err)
-	}
-	if resp.GetPartialSuccess().GetRejectedSpans() != 0 {
-		t.Errorf("rejected_spans = %d, want 0", resp.GetPartialSuccess().GetRejectedSpans())
-	}
+	require.NoError(t, err)
+	assert.Zero(t, resp.GetPartialSuccess().GetRejectedSpans(), "rejected_spans")
 
 	got := rec.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("stored %d records, want 2", len(got))
-	}
-	if got[0].Service != "checkout" {
-		t.Errorf("record[0].Service = %q", got[0].Service)
-	}
-	if count := counterValue(t, reg, "topology_spans_received_total"); count != 2 {
-		t.Errorf("spans_received counter = %v, want 2", count)
-	}
+	require.Len(t, got, 2)
+	assert.Equal(t, "checkout", got[0].Service)
+	assert.InDelta(t, 2, counterValue(t, reg, "topology_spans_received_total"), 0, "spans_received counter")
 }
 
 func TestGRPCServer_Export_AcceptsGzipCompression(t *testing.T) {
@@ -107,15 +99,9 @@ func TestGRPCServer_Export_AcceptsGzipCompression(t *testing.T) {
 		},
 	}
 	resp, err := client.Export(t.Context(), req, grpc.UseCompressor("gzip"))
-	if err != nil {
-		t.Fatalf("Export: %v", err)
-	}
-	if resp.GetPartialSuccess().GetRejectedSpans() != 0 {
-		t.Errorf("rejected_spans = %d, want 0", resp.GetPartialSuccess().GetRejectedSpans())
-	}
-	if got := len(rec.snapshot()); got != 1 {
-		t.Errorf("stored %d records, want 1", got)
-	}
+	require.NoError(t, err)
+	assert.Zero(t, resp.GetPartialSuccess().GetRejectedSpans(), "rejected_spans")
+	assert.Len(t, rec.snapshot(), 1)
 }
 
 func TestGRPCServer_Export_ReportsRejectedSpans(t *testing.T) {
@@ -146,15 +132,10 @@ func TestGRPCServer_Export_ReportsRejectedSpans(t *testing.T) {
 		},
 	}
 	resp, err := client.Export(t.Context(), req)
-	if err != nil {
-		t.Fatalf("Export: %v", err)
-	}
-	if got := resp.GetPartialSuccess().GetRejectedSpans(); got != 2 {
-		t.Errorf("rejected_spans = %d, want 2", got)
-	}
-	if count := counterValue(t, reg, "topology_spans_received_total"); count != 3 {
-		t.Errorf("spans_received counter = %v, want 3 (all decoded, incl. rejected)", count)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resp.GetPartialSuccess().GetRejectedSpans(), "rejected_spans")
+	assert.InDelta(t, 3, counterValue(t, reg, "topology_spans_received_total"), 0,
+		"spans_received counter counts all decoded spans, incl. rejected")
 }
 
 func TestGRPCServer_Shutdown_HaltsServer(t *testing.T) {
@@ -166,9 +147,7 @@ func TestGRPCServer_Shutdown_HaltsServer(t *testing.T) {
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err)
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- server.Serve(ln)
@@ -176,16 +155,14 @@ func TestGRPCServer_Shutdown_HaltsServer(t *testing.T) {
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := server.Shutdown(stopCtx); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
+	require.NoError(t, server.Shutdown(stopCtx))
 	select {
 	case err := <-serveErr:
-		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-			t.Errorf("Serve returned %v", err)
+		if err != nil {
+			require.ErrorIs(t, err, grpc.ErrServerStopped, "Serve returned unexpected error")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Serve did not return after Shutdown")
+		require.Fail(t, "Serve did not return after Shutdown")
 	}
 }
 
@@ -196,36 +173,26 @@ func TestGRPCServer_StartServesAndShutdownHalts(t *testing.T) {
 	metrics := ingest.NewMetrics(prometheus.NewRegistry())
 	server := ingest.NewGRPCServer(rec, "127.0.0.1:0", metrics, zap.NewNop())
 
-	if err := server.Start(t.Context(), noopHost{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	require.NoError(t, server.Start(t.Context(), noopHost{}))
 
 	addr := server.Addr()
-	if addr == nil {
-		t.Fatal("Addr() returned nil after Start")
-	}
+	require.NotNil(t, addr, "Addr() returned nil after Start")
 	conn, err := grpc.NewClient(addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatalf("grpc.NewClient: %v", err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	client := coltracepb.NewTraceServiceClient(conn)
 
-	if _, err := client.Export(t.Context(), &coltracepb.ExportTraceServiceRequest{}); err != nil {
-		t.Fatalf("Export before Shutdown: %v", err)
-	}
+	_, err = client.Export(t.Context(), &coltracepb.ExportTraceServiceRequest{})
+	require.NoError(t, err, "Export before Shutdown")
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stopCancel()
-	if err := server.Shutdown(stopCtx); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
+	require.NoError(t, server.Shutdown(stopCtx))
 
 	postCtx, postCancel := context.WithTimeout(context.Background(), time.Second)
 	defer postCancel()
-	if _, err := client.Export(postCtx, &coltracepb.ExportTraceServiceRequest{}); err == nil {
-		t.Error("Export succeeded after Shutdown; expected failure")
-	}
+	_, err = client.Export(postCtx, &coltracepb.ExportTraceServiceRequest{})
+	require.Error(t, err, "Export succeeded after Shutdown; expected failure")
 }
 
 type noopHost struct{}
@@ -240,18 +207,14 @@ func dialGRPC(t *testing.T, server *ingest.GRPCServer) (coltracepb.TraceServiceC
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err)
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- server.Serve(ln)
 	}()
 
 	conn, err := grpc.NewClient(ln.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err)
 	client := coltracepb.NewTraceServiceClient(conn)
 
 	cleanup := func() {
@@ -271,14 +234,10 @@ func dialGRPC(t *testing.T, server *ingest.GRPCServer) (coltracepb.TraceServiceC
 func counterValue(t *testing.T, reg *prometheus.Registry, name string, labelKV ...string) float64 {
 	t.Helper()
 
-	if len(labelKV)%2 != 0 {
-		t.Fatalf("counterValue: odd labelKV length %d", len(labelKV))
-	}
+	require.Zero(t, len(labelKV)%2, "counterValue: odd labelKV length %d", len(labelKV))
 
 	families, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("Gather: %v", err)
-	}
+	require.NoError(t, err)
 	for _, f := range families {
 		if f.GetName() != name {
 			continue
@@ -287,14 +246,12 @@ func counterValue(t *testing.T, reg *prometheus.Registry, name string, labelKV .
 			if !labelsMatch(m.GetLabel(), labelKV) {
 				continue
 			}
-			if m.GetCounter() == nil {
-				t.Fatalf("metric %q has no counter value", name)
-			}
+			require.NotNil(t, m.GetCounter(), "metric %q has no counter value", name)
 			return m.GetCounter().GetValue()
 		}
-		t.Fatalf("metric %q has no sample matching labels %v", name, labelKV)
+		require.Fail(t, "metric has no matching sample", "metric %q has no sample matching labels %v", name, labelKV)
 	}
-	t.Fatalf("metric %q not in registry", name)
+	require.Fail(t, "metric not in registry", "metric %q", name)
 	return 0
 }
 

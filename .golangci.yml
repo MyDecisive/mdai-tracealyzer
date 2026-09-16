@@ -6,6 +6,8 @@ linters:
   disable:
     - depguard
     - err113
+    - exhaustruct
+    - exhaustruct_v5
     - godox
     - gomodguard
     - lll
@@ -38,9 +40,6 @@ linters:
       enable-all: true
       disable:
         - fieldalignment
-    exhaustruct:
-      include:
-        - github.com/mydecisive/mdai-tracealyzer/internal/
     testifylint:
       enable-all: true
     revive:

@@ -2,8 +2,10 @@ package topology
 
 import (
 	"math"
-	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCompute(t *testing.T) {
@@ -473,12 +475,8 @@ func TestCompute(t *testing.T) {
 
 			rows, orphans := Compute(traceID(), tt.spans)
 
-			if orphans != tt.wantOrphans {
-				t.Fatalf("orphans mismatch: want %d, got %d", tt.wantOrphans, orphans)
-			}
-			if !reflect.DeepEqual(rows, tt.wantRows) {
-				t.Fatalf("rows mismatch\nwant: %#v\n got: %#v", tt.wantRows, rows)
-			}
+			require.Equal(t, tt.wantOrphans, orphans, "orphans mismatch")
+			require.Equal(t, tt.wantRows, rows, "rows mismatch")
 		})
 	}
 }
@@ -514,15 +512,9 @@ func TestComputeSumsSpanBytesTotalPerRoot(t *testing.T) {
 	}
 
 	rows, orphans := Compute(traceID(), spans)
-	if orphans != 0 {
-		t.Fatalf("orphans = %d, want 0", orphans)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("want 1 row, got %d", len(rows))
-	}
-	if got, want := rows[0].SpanBytesTotal, int64(500); got != want {
-		t.Fatalf("SpanBytesTotal = %d, want %d", got, want)
-	}
+	require.Zero(t, orphans)
+	require.Len(t, rows, 1)
+	require.Equal(t, int64(500), rows[0].SpanBytesTotal)
 }
 
 func TestComputeMultiRoot_SpanBytesTotalIsPerRoot(t *testing.T) {
@@ -558,22 +550,14 @@ func TestComputeMultiRoot_SpanBytesTotalIsPerRoot(t *testing.T) {
 	}
 
 	rows, orphans := Compute(traceID(), spans)
-	if orphans != 0 {
-		t.Fatalf("orphans = %d, want 0", orphans)
-	}
-	if len(rows) != 2 {
-		t.Fatalf("rows = %d, want 2", len(rows))
-	}
+	require.Zero(t, orphans)
+	require.Len(t, rows, 2)
 	got := map[string]int64{}
 	for _, r := range rows {
 		got[r.RootService] = r.SpanBytesTotal
 	}
-	if got["svc-a"] != 125 {
-		t.Errorf("SpanBytesTotal{svc-a} = %d, want 125", got["svc-a"])
-	}
-	if got["svc-b"] != 475 {
-		t.Errorf("SpanBytesTotal{svc-b} = %d, want 475", got["svc-b"])
-	}
+	assert.Equal(t, int64(125), got["svc-a"])
+	assert.Equal(t, int64(475), got["svc-b"])
 }
 
 func TestComputeOperationDerivation(t *testing.T) {
@@ -652,9 +636,7 @@ func TestComputeOperationDerivation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := deriveOperation(tt.span); got != tt.want {
-				t.Fatalf("want %q, got %q", tt.want, got)
-			}
+			require.Equal(t, tt.want, deriveOperation(tt.span))
 		})
 	}
 }
@@ -664,12 +646,8 @@ func TestComputeNilInputReturnsNilRows(t *testing.T) {
 
 	rows, orphans := Compute(traceID(), nil)
 
-	if rows != nil {
-		t.Fatalf("want nil rows, got %#v", rows)
-	}
-	if orphans != 0 {
-		t.Fatalf("want 0 orphans, got %d", orphans)
-	}
+	require.Nil(t, rows)
+	require.Zero(t, orphans)
 }
 
 func TestComputeBranchingServiceHopDepth(t *testing.T) {
@@ -687,15 +665,9 @@ func TestComputeBranchingServiceHopDepth(t *testing.T) {
 
 	rows, orphans := Compute(traceID(), spans)
 
-	if orphans != 0 {
-		t.Fatalf("want 0 orphans, got %d", orphans)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("want 1 row, got %d", len(rows))
-	}
-	if rows[0].ServiceHopDepth != 4 {
-		t.Fatalf("want service hop depth 4, got %d", rows[0].ServiceHopDepth)
-	}
+	require.Zero(t, orphans)
+	require.Len(t, rows, 1)
+	require.Equal(t, int32(4), rows[0].ServiceHopDepth)
 }
 
 func TestComputeOperationCountUsesServiceAndOperationPair(t *testing.T) {
@@ -710,15 +682,9 @@ func TestComputeOperationCountUsesServiceAndOperationPair(t *testing.T) {
 
 	rows, orphans := Compute(traceID(), spans)
 
-	if orphans != 0 {
-		t.Fatalf("want 0 orphans, got %d", orphans)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("want 1 row, got %d", len(rows))
-	}
-	if rows[0].OperationCount != 3 {
-		t.Fatalf("want operation count 3, got %d", rows[0].OperationCount)
-	}
+	require.Zero(t, orphans)
+	require.Len(t, rows, 1)
+	require.Equal(t, int32(3), rows[0].OperationCount)
 }
 
 func TestComputeErrorCountExcludesOrphanedErrors(t *testing.T) {
@@ -734,15 +700,9 @@ func TestComputeErrorCountExcludesOrphanedErrors(t *testing.T) {
 
 	rows, orphans := Compute(traceID(), spans)
 
-	if orphans != 2 {
-		t.Fatalf("want 2 orphans, got %d", orphans)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("want 1 row, got %d", len(rows))
-	}
-	if rows[0].ErrorCount != 3 {
-		t.Fatalf("want error count 3, got %d", rows[0].ErrorCount)
-	}
+	require.Equal(t, int32(2), orphans)
+	require.Len(t, rows, 1)
+	require.Equal(t, int32(3), rows[0].ErrorCount)
 }
 
 func TestComputeTraceIDHexEncoding(t *testing.T) {
@@ -773,15 +733,9 @@ func TestComputeTraceIDHexEncoding(t *testing.T) {
 				spanID(1): {ParentSpanID: [8]byte{}, Service: "svc", Name: "root"},
 			})
 
-			if orphans != 0 {
-				t.Fatalf("want 0 orphans, got %d", orphans)
-			}
-			if len(rows) != 1 {
-				t.Fatalf("want 1 row, got %d", len(rows))
-			}
-			if rows[0].TraceID != tt.want {
-				t.Fatalf("want trace id %q, got %q", tt.want, rows[0].TraceID)
-			}
+			require.Zero(t, orphans)
+			require.Len(t, rows, 1)
+			require.Equal(t, tt.want, rows[0].TraceID)
 		})
 	}
 }
@@ -804,15 +758,9 @@ func TestComputeRootOperationUsesOnlyRootAttrs(t *testing.T) {
 
 	rows, orphans := Compute(traceID(), spans)
 
-	if orphans != 0 {
-		t.Fatalf("want 0 orphans, got %d", orphans)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("want 1 row, got %d", len(rows))
-	}
-	if rows[0].RootOperation != "root-name" {
-		t.Fatalf("want root operation %q, got %q", "root-name", rows[0].RootOperation)
-	}
+	require.Zero(t, orphans)
+	require.Len(t, rows, 1)
+	require.Equal(t, "root-name", rows[0].RootOperation)
 }
 
 func TestComputeSelfParentedSpanBecomesOrphan(t *testing.T) {
@@ -828,12 +776,8 @@ func TestComputeSelfParentedSpanBecomesOrphan(t *testing.T) {
 
 	rows, orphans := Compute(traceID(), spans)
 
-	if len(rows) != 0 {
-		t.Fatalf("want no rows, got %#v", rows)
-	}
-	if orphans != 1 {
-		t.Fatalf("want 1 orphan, got %d", orphans)
-	}
+	require.Empty(t, rows)
+	require.Equal(t, int32(1), orphans)
 }
 
 func TestComputeDeterministicOutput(t *testing.T) {
@@ -849,12 +793,8 @@ func TestComputeDeterministicOutput(t *testing.T) {
 	wantRows, wantOrphans := Compute(traceID(), spans)
 	for range 20 {
 		gotRows, gotOrphans := Compute(traceID(), spans)
-		if gotOrphans != wantOrphans {
-			t.Fatalf("want orphan count %d, got %d", wantOrphans, gotOrphans)
-		}
-		if !reflect.DeepEqual(gotRows, wantRows) {
-			t.Fatalf("non-deterministic rows\nwant: %#v\n got: %#v", wantRows, gotRows)
-		}
+		require.Equal(t, wantOrphans, gotOrphans)
+		require.Equal(t, wantRows, gotRows, "non-deterministic rows")
 	}
 }
 
@@ -876,9 +816,7 @@ func TestSafeInt32(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := safeInt32(tt.in); got != tt.want {
-				t.Fatalf("want %d, got %d", tt.want, got)
-			}
+			require.Equal(t, tt.want, safeInt32(tt.in))
 		})
 	}
 }

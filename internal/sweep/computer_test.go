@@ -1,11 +1,11 @@
 package sweep_test
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/buffer"
 	"github.com/mydecisive/mdai-tracealyzer/internal/sweep"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTopologyComputer_RootPresent_ReturnsRow(t *testing.T) {
@@ -37,22 +37,13 @@ func TestTopologyComputer_RootPresent_ReturnsRow(t *testing.T) {
 	}
 
 	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, records)
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
-	if orphans != 0 {
-		t.Fatalf("orphans: want 0, got %d", orphans)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("rows: want 1, got %d", len(rows))
-	}
+	require.NoError(t, err, "Compute")
+	require.Zero(t, orphans, "orphans")
+	require.Len(t, rows, 1, "rows")
 	row := rows[0]
-	if row.RootService != "checkout" || row.RootOperation != "POST /checkout" {
-		t.Fatalf("row root: want checkout::POST /checkout, got %s::%s", row.RootService, row.RootOperation)
-	}
-	if row.SpanCount != 2 {
-		t.Fatalf("span_count: want 2, got %d", row.SpanCount)
-	}
+	require.Equal(t, "checkout", row.RootService, "row root service")
+	require.Equal(t, "POST /checkout", row.RootOperation, "row root operation")
+	require.Equal(t, int32(2), row.SpanCount, "span_count")
 }
 
 func TestTopologyComputer_MultiRoot_ReturnsAllRows(t *testing.T) {
@@ -76,22 +67,14 @@ func TestTopologyComputer_MultiRoot_ReturnsAllRows(t *testing.T) {
 	}
 
 	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, records)
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
-	if orphans != 0 {
-		t.Fatalf("orphans: want 0, got %d", orphans)
-	}
-	if len(rows) != 2 {
-		t.Fatalf("rows: want 2, got %d", len(rows))
-	}
+	require.NoError(t, err, "Compute")
+	require.Zero(t, orphans, "orphans")
+	require.Len(t, rows, 2, "rows")
 	seen := map[string]bool{}
 	for _, r := range rows {
 		seen[r.RootService+"::"+r.RootOperation] = true
 	}
-	if !seen["svc-a::root-a"] || !seen["svc-b::root-b"] {
-		t.Fatalf("expected both roots in output, got %+v", rows)
-	}
+	require.True(t, seen["svc-a::root-a"] && seen["svc-b::root-b"], "expected both roots in output, got %+v", rows)
 }
 
 func TestTopologyComputer_NoRoot_ReturnsErrNoRootAndOrphans(t *testing.T) {
@@ -118,15 +101,9 @@ func TestTopologyComputer_NoRoot_ReturnsErrNoRootAndOrphans(t *testing.T) {
 	}
 
 	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, records)
-	if !errors.Is(err, sweep.ErrNoRoot) {
-		t.Fatalf("err: want ErrNoRoot, got %v", err)
-	}
-	if orphans != 2 {
-		t.Fatalf("orphans: want 2, got %d", orphans)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("rows: want empty on ErrNoRoot, got %+v", rows)
-	}
+	require.ErrorIs(t, err, sweep.ErrNoRoot)
+	require.Equal(t, int32(2), orphans, "orphans")
+	require.Empty(t, rows, "rows on ErrNoRoot")
 }
 
 func TestTopologyComputer_PropagatesSizeBytesFromRecord(t *testing.T) {
@@ -160,18 +137,10 @@ func TestTopologyComputer_PropagatesSizeBytesFromRecord(t *testing.T) {
 	}
 
 	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, records)
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
-	if orphans != 0 {
-		t.Fatalf("orphans: want 0, got %d", orphans)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("rows: want 1, got %d", len(rows))
-	}
-	if got, want := rows[0].SpanBytesTotal, int64(750); got != want {
-		t.Fatalf("SpanBytesTotal: want %d (600+150 from SpanRecord.SizeBytes), got %d", want, got)
-	}
+	require.NoError(t, err, "Compute")
+	require.Zero(t, orphans, "orphans")
+	require.Len(t, rows, 1, "rows")
+	require.Equal(t, int64(750), rows[0].SpanBytesTotal, "SpanBytesTotal (600+150 from SpanRecord.SizeBytes)")
 }
 
 func TestTopologyComputer_EmptyInput_IsNotErrNoRoot(t *testing.T) {
@@ -179,13 +148,7 @@ func TestTopologyComputer_EmptyInput_IsNotErrNoRoot(t *testing.T) {
 
 	var traceID [16]byte
 	rows, orphans, err := sweep.TopologyComputer{}.Compute(traceID, nil)
-	if err != nil {
-		t.Fatalf("err: want nil on empty input, got %v", err)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("rows: want empty, got %+v", rows)
-	}
-	if orphans != 0 {
-		t.Fatalf("orphans: want 0, got %d", orphans)
-	}
+	require.NoError(t, err, "want nil error on empty input")
+	require.Empty(t, rows, "rows")
+	require.Zero(t, orphans, "orphans")
 }

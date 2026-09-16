@@ -25,4 +25,5 @@ emitter:
 service:
   log_level: "debug"
   metrics_endpoint: "0.0.0.0:19090"
+  pprof_endpoint: ""
   shutdown_grace: "45s"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/pprof"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -72,10 +73,16 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 	for _, c := range s.components {
 		s.logger.Info("supervisor: starting component", zap.String("name", c.Name()))
-		if err := c.Start(ctx, s); err != nil {
-			triggerErr = fmt.Errorf("start %s: %w", c.Name(), err)
+		// Labels set here are inherited by the goroutines Start spawns, so leak
+		// profiles and tracebacks attribute them to component=<name>.
+		var startErr error
+		pprof.Do(ctx, pprof.Labels("component", c.Name()), func(ctx context.Context) {
+			startErr = c.Start(ctx, s)
+		})
+		if startErr != nil {
+			triggerErr = fmt.Errorf("start %s: %w", c.Name(), startErr)
 			s.logger.Error("supervisor: start failed",
-				zap.String("name", c.Name()), zap.Error(err))
+				zap.String("name", c.Name()), zap.Error(startErr))
 			break
 		}
 	}

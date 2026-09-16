@@ -4,11 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/config"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -85,21 +85,10 @@ func TestManagerMigrateAppliesStatementsInOrder(t *testing.T) {
 	conn := &fakeSQLConn{}
 	m := testManager(conn)
 
-	if err := m.Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	require.NoError(t, m.Migrate(context.Background()))
 	want := []string{createSourceTableSQL("14d"), createSinkTableSQL(), createFlowSQL()}
-	if len(conn.execs) != len(want) {
-		t.Fatalf("want %d statements, got %d", len(want), len(conn.execs))
-	}
-	for i := range want {
-		if conn.execs[i] != want[i] {
-			t.Fatalf("statement %d mismatch\nwant: %q\n got: %q", i, want[i], conn.execs[i])
-		}
-	}
-	if !conn.closed {
-		t.Fatal("expected connection close")
-	}
+	require.Equal(t, want, conn.execs, "statements")
+	require.True(t, conn.closed, "expected connection close")
 }
 
 func TestManagerCheckReadyChecksAllObjects(t *testing.T) {
@@ -108,22 +97,13 @@ func TestManagerCheckReadyChecksAllObjects(t *testing.T) {
 	conn := &fakeSQLConn{}
 	m := testManager(conn)
 
-	if err := m.CheckReady(context.Background()); err != nil {
-		t.Fatalf("CheckReady: %v", err)
-	}
+	require.NoError(t, m.CheckReady(context.Background()))
 	want := []string{
 		"SHOW CREATE TABLE trace_root_topology",
 		"SHOW CREATE TABLE trace_root_topology_1m",
 		"SHOW CREATE FLOW trace_root_topology_1m_flow",
 	}
-	if len(conn.queries) != len(want) {
-		t.Fatalf("want %d queries, got %d", len(want), len(conn.queries))
-	}
-	for i := range want {
-		if conn.queries[i] != want[i] {
-			t.Fatalf("query %d mismatch\nwant: %q\n got: %q", i, want[i], conn.queries[i])
-		}
-	}
+	require.Equal(t, want, conn.queries, "queries")
 }
 
 func TestManagerConnectFailsOnPing(t *testing.T) {
@@ -133,15 +113,8 @@ func TestManagerConnectFailsOnPing(t *testing.T) {
 	m := testManager(conn)
 
 	err := m.CheckReady(context.Background())
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "ping greptimedb sql endpoint") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !conn.closed {
-		t.Fatal("expected connection close on ping error")
-	}
+	require.ErrorContains(t, err, "ping greptimedb sql endpoint")
+	require.True(t, conn.closed, "expected connection close on ping error")
 }
 
 func TestManagerMigrateFailsOnStatementError(t *testing.T) {
@@ -151,25 +124,16 @@ func TestManagerMigrateFailsOnStatementError(t *testing.T) {
 	m := testManager(conn)
 
 	err := m.Migrate(context.Background())
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "apply trace_root_topology_1m") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.ErrorContains(t, err, "apply trace_root_topology_1m")
 }
 
 func TestBuildPostgresDSN(t *testing.T) {
 	t.Parallel()
 
 	dsn, err := buildPostgresDSN(testEmitterConfig())
-	if err != nil {
-		t.Fatalf("buildPostgresDSN: %v", err)
-	}
+	require.NoError(t, err)
 	want := "postgres://mdai:secret@127.0.0.1:4003/mdai?sslmode=disable" //nolint:gosec // test fixture, not a real credential.
-	if dsn != want {
-		t.Fatalf("dsn = %q, want %q", dsn, want)
-	}
+	require.Equal(t, want, dsn)
 }
 
 func TestBuildPostgresDSN_EmptyAuth(t *testing.T) {
@@ -179,13 +143,9 @@ func TestBuildPostgresDSN_EmptyAuth(t *testing.T) {
 	cfg.GreptimeDBAuth = ""
 
 	dsn, err := buildPostgresDSN(cfg)
-	if err != nil {
-		t.Fatalf("buildPostgresDSN: %v", err)
-	}
+	require.NoError(t, err)
 	want := "postgres://127.0.0.1:4003/mdai?sslmode=disable"
-	if dsn != want {
-		t.Fatalf("dsn = %q, want %q", dsn, want)
-	}
+	require.Equal(t, want, dsn)
 }
 
 func testManager(conn *fakeSQLConn) *Manager {

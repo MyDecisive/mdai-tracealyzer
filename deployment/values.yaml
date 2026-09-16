@@ -65,6 +65,7 @@ config:
   service:
     logLevel: "info"
     metricsEndpoint: "0.0.0.0:9090"
+    pprofEndpoint: "127.0.0.1:6060"
     shutdownGrace: "30s"
 
 secrets:

@@ -22,6 +22,7 @@ vendor/
 
 # Local build outputs
 /mdai-tracealyzer
+/cmd/mdai-tracealyzer/mdai-tracealyzer
 mdai-tracealyzer-*.tgz
 test-stand/demo/demo-control
 
@@ -35,5 +36,8 @@ go.work.sum
 # Editor/IDE
 .idea/
 .vscode/
+
+# macOS
+.DS_Store
 
 .claude/

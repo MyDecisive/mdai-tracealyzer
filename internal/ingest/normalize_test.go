@@ -1,10 +1,11 @@
 package ingest_test
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -43,47 +44,25 @@ func TestNormalize_HappyPath_RootAndChild(t *testing.T) {
 	}
 
 	records, _ := ingest.Normalize(req)
-	if len(records) != 2 {
-		t.Fatalf("want 2 records, got %d", len(records))
-	}
+	require.Len(t, records, 2)
 
 	root := records[0]
-	if root.TraceID != traceIDAllBytes {
-		t.Errorf("root trace_id = %x, want %x", root.TraceID, traceIDAllBytes)
-	}
-	if root.SpanID != rootSpanID {
-		t.Errorf("root span_id = %x, want %x", root.SpanID, rootSpanID)
-	}
-	if root.ParentSpanID != ([8]byte{}) {
-		t.Errorf("root parent_span_id = %x, want zero", root.ParentSpanID)
-	}
-	if root.Service != "checkout" {
-		t.Errorf("root service = %q, want %q", root.Service, "checkout")
-	}
-	if root.Name != "POST /api/orders" {
-		t.Errorf("root name = %q", root.Name)
-	}
-	if root.Kind != int32(tracepb.Span_SPAN_KIND_SERVER) {
-		t.Errorf("root kind = %d", root.Kind)
-	}
-	if root.StatusError {
-		t.Error("root status_error = true, want false")
-	}
+	assert.Equal(t, traceIDAllBytes, root.TraceID, "root trace_id")
+	assert.Equal(t, rootSpanID, root.SpanID, "root span_id")
+	assert.Zero(t, root.ParentSpanID, "root parent_span_id")
+	assert.Equal(t, "checkout", root.Service, "root service")
+	assert.Equal(t, "POST /api/orders", root.Name, "root name")
+	assert.Equal(t, int32(tracepb.Span_SPAN_KIND_SERVER), root.Kind, "root kind")
+	assert.False(t, root.StatusError, "root status_error")
 	wantAttrs := map[string]string{
 		"http.request.method": "POST",
 		"http.route":          "/api/orders",
 	}
-	if !reflect.DeepEqual(root.OpAttrs, wantAttrs) {
-		t.Errorf("root OpAttrs = %v, want %v", root.OpAttrs, wantAttrs)
-	}
+	assert.Equal(t, wantAttrs, root.OpAttrs, "root OpAttrs")
 
 	child := records[1]
-	if child.ParentSpanID != rootSpanID {
-		t.Errorf("child parent_span_id = %x, want %x", child.ParentSpanID, rootSpanID)
-	}
-	if child.OpAttrs != nil {
-		t.Errorf("child OpAttrs = %v, want nil (non-root)", child.OpAttrs)
-	}
+	assert.Equal(t, rootSpanID, child.ParentSpanID, "child parent_span_id")
+	assert.Nil(t, child.OpAttrs, "child OpAttrs (non-root)")
 }
 
 func TestNormalize_MultiResourceSpans_SharesTraceIDAcrossServices(t *testing.T) {
@@ -99,15 +78,10 @@ func TestNormalize_MultiResourceSpans_SharesTraceIDAcrossServices(t *testing.T) 
 	}
 
 	records, _ := ingest.Normalize(req)
-	if len(records) != 2 {
-		t.Fatalf("want 2 records, got %d", len(records))
-	}
-	if records[0].Service != "checkout" || records[1].Service != "inventory" {
-		t.Errorf("services = %q, %q — want checkout, inventory", records[0].Service, records[1].Service)
-	}
-	if records[0].TraceID != records[1].TraceID {
-		t.Error("records share trace_id: mismatch")
-	}
+	require.Len(t, records, 2)
+	assert.Equal(t, "checkout", records[0].Service)
+	assert.Equal(t, "inventory", records[1].Service)
+	assert.Equal(t, records[0].TraceID, records[1].TraceID, "records share trace_id")
 }
 
 func TestNormalize_DatadogFragmentedTraceID_UsedAsIs(t *testing.T) {
@@ -123,12 +97,8 @@ func TestNormalize_DatadogFragmentedTraceID_UsedAsIs(t *testing.T) {
 	}
 
 	records, _ := ingest.Normalize(req)
-	if len(records) != 1 {
-		t.Fatalf("want 1 record, got %d", len(records))
-	}
-	if records[0].TraceID != traceIDDatadog {
-		t.Errorf("trace_id = %x, want %x", records[0].TraceID, traceIDDatadog)
-	}
+	require.Len(t, records, 1)
+	assert.Equal(t, traceIDDatadog, records[0].TraceID, "trace_id")
 }
 
 func TestNormalize_RootOperationAttributes_PerProtocol(t *testing.T) {
@@ -189,12 +159,8 @@ func TestNormalize_RootOperationAttributes_PerProtocol(t *testing.T) {
 				}),
 			}
 			records, _ := ingest.Normalize(req)
-			if len(records) != 1 {
-				t.Fatalf("want 1 record, got %d", len(records))
-			}
-			if !reflect.DeepEqual(records[0].OpAttrs, tc.want) {
-				t.Errorf("OpAttrs = %v, want %v", records[0].OpAttrs, tc.want)
-			}
+			require.Len(t, records, 1)
+			assert.Equal(t, tc.want, records[0].OpAttrs, "OpAttrs")
 		})
 	}
 }
@@ -210,18 +176,10 @@ func TestNormalize_StatusErrorMappedToBool(t *testing.T) {
 		}),
 	}
 	records, _ := ingest.Normalize(req)
-	if len(records) != 3 {
-		t.Fatalf("want 3 records, got %d", len(records))
-	}
-	if !records[0].StatusError {
-		t.Error("root StatusError = false, want true")
-	}
-	if records[1].StatusError {
-		t.Error("ok child StatusError = true, want false")
-	}
-	if !records[2].StatusError {
-		t.Error("err child StatusError = false, want true")
-	}
+	require.Len(t, records, 3)
+	assert.True(t, records[0].StatusError, "root StatusError")
+	assert.False(t, records[1].StatusError, "ok child StatusError")
+	assert.True(t, records[2].StatusError, "err child StatusError")
 }
 
 func TestNormalize_InvalidIDLengthsAreSkipped(t *testing.T) {
@@ -249,15 +207,9 @@ func TestNormalize_InvalidIDLengthsAreSkipped(t *testing.T) {
 		resourceSpans("svc", []*tracepb.Span{badTrace, badSpan, badParent, good}),
 	}
 	records, malformed := ingest.Normalize(req)
-	if len(records) != 1 {
-		t.Fatalf("want 1 record, got %d", len(records))
-	}
-	if records[0].Name != "good" {
-		t.Errorf("survived record = %q, want good", records[0].Name)
-	}
-	if malformed != 3 {
-		t.Errorf("malformed = %d, want 3", malformed)
-	}
+	require.Len(t, records, 1)
+	assert.Equal(t, "good", records[0].Name, "survived record")
+	assert.Equal(t, 3, malformed, "malformed")
 }
 
 func TestNormalize_AllZeroIDsAreSkipped(t *testing.T) {
@@ -275,15 +227,9 @@ func TestNormalize_AllZeroIDsAreSkipped(t *testing.T) {
 		resourceSpans("svc", []*tracepb.Span{badTrace, badSpan, badParent, good}),
 	}
 	records, malformed := ingest.Normalize(req)
-	if len(records) != 1 {
-		t.Fatalf("want 1 record, got %d", len(records))
-	}
-	if records[0].Name != "good" {
-		t.Errorf("survived record = %q, want good", records[0].Name)
-	}
-	if malformed != 3 {
-		t.Errorf("malformed = %d, want 3", malformed)
-	}
+	require.Len(t, records, 1)
+	assert.Equal(t, "good", records[0].Name, "survived record")
+	assert.Equal(t, 3, malformed, "malformed")
 }
 
 func TestNormalize_MissingServiceNameIsEmptyString(t *testing.T) {
@@ -298,12 +244,8 @@ func TestNormalize_MissingServiceNameIsEmptyString(t *testing.T) {
 		}},
 	}}
 	records, _ := ingest.Normalize(req)
-	if len(records) != 1 {
-		t.Fatalf("want 1 record, got %d", len(records))
-	}
-	if records[0].Service != "" {
-		t.Errorf("service = %q, want empty", records[0].Service)
-	}
+	require.Len(t, records, 1)
+	assert.Empty(t, records[0].Service, "service")
 }
 
 func TestNormalize_NilEntriesIgnored(t *testing.T) {
@@ -327,9 +269,7 @@ func TestNormalize_NilEntriesIgnored(t *testing.T) {
 		},
 	}
 	records, _ := ingest.Normalize(req)
-	if len(records) != 1 {
-		t.Fatalf("want 1 record, got %d", len(records))
-	}
+	require.Len(t, records, 1)
 }
 
 func TestNormalize_SizeBytesIncludesApportionedOverhead(t *testing.T) {
@@ -343,15 +283,10 @@ func TestNormalize_SizeBytesIncludesApportionedOverhead(t *testing.T) {
 	want := int64(proto.Size(req[0]))
 
 	records, _ := ingest.Normalize(req)
-	if len(records) != 1 {
-		t.Fatalf("want 1 record, got %d", len(records))
-	}
-	if records[0].SizeBytes != want {
-		t.Errorf("SizeBytes = %d, want %d (proto.Size(ResourceSpans) for single-span group)", records[0].SizeBytes, want)
-	}
-	if records[0].SizeBytes <= int64(proto.Size(span)) {
-		t.Fatalf("SizeBytes (%d) should exceed bare proto.Size(span) (%d); fixture has no resource overhead", records[0].SizeBytes, proto.Size(span))
-	}
+	require.Len(t, records, 1)
+	assert.Equal(t, want, records[0].SizeBytes, "SizeBytes should be proto.Size(ResourceSpans) for single-span group")
+	require.Greater(t, records[0].SizeBytes, int64(proto.Size(span)),
+		"SizeBytes should exceed bare proto.Size(span); fixture has no resource overhead")
 }
 
 func TestNormalize_SizeBytesSumsToResourceSpansSize(t *testing.T) {
@@ -369,20 +304,14 @@ func TestNormalize_SizeBytesSumsToResourceSpansSize(t *testing.T) {
 	want := int64(proto.Size(req[0]))
 
 	records, malformed := ingest.Normalize(req)
-	if malformed != 0 {
-		t.Fatalf("malformed = %d, want 0", malformed)
-	}
-	if len(records) != len(spans) {
-		t.Fatalf("len(records) = %d, want %d", len(records), len(spans))
-	}
+	require.Zero(t, malformed, "malformed")
+	require.Len(t, records, len(spans))
 
 	var sum int64
 	for _, r := range records {
 		sum += r.SizeBytes
 	}
-	if sum != want {
-		t.Errorf("sum(SizeBytes) = %d, want %d (proto.Size(ResourceSpans))", sum, want)
-	}
+	assert.Equal(t, want, sum, "sum(SizeBytes) should be proto.Size(ResourceSpans)")
 }
 
 func TestNormalize_SizeBytesIsolatedPerResourceSpans(t *testing.T) {
@@ -405,12 +334,8 @@ func TestNormalize_SizeBytesIsolatedPerResourceSpans(t *testing.T) {
 	wantB := int64(proto.Size(rsB))
 
 	records, malformed := ingest.Normalize([]*tracepb.ResourceSpans{rsA, rsB})
-	if malformed != 0 {
-		t.Fatalf("malformed = %d, want 0", malformed)
-	}
-	if len(records) != 3 {
-		t.Fatalf("len(records) = %d, want 3", len(records))
-	}
+	require.Zero(t, malformed, "malformed")
+	require.Len(t, records, 3)
 
 	var sumA, sumB int64
 	for _, r := range records {
@@ -420,15 +345,11 @@ func TestNormalize_SizeBytesIsolatedPerResourceSpans(t *testing.T) {
 		case "inv":
 			sumB += r.SizeBytes
 		default:
-			t.Fatalf("unexpected service %q", r.Service)
+			require.Fail(t, "unexpected service", "service %q", r.Service)
 		}
 	}
-	if sumA != wantA {
-		t.Errorf("sum(SizeBytes) for rsA = %d, want %d (proto.Size(rsA))", sumA, wantA)
-	}
-	if sumB != wantB {
-		t.Errorf("sum(SizeBytes) for rsB = %d, want %d (proto.Size(rsB))", sumB, wantB)
-	}
+	assert.Equal(t, wantA, sumA, "sum(SizeBytes) for rsA should be proto.Size(rsA)")
+	assert.Equal(t, wantB, sumB, "sum(SizeBytes) for rsB should be proto.Size(rsB)")
 }
 
 func TestNormalize_TimestampsPreserved(t *testing.T) {
@@ -445,15 +366,9 @@ func TestNormalize_TimestampsPreserved(t *testing.T) {
 		resourceSpans("svc", []*tracepb.Span{span}),
 	}
 	records, _ := ingest.Normalize(req)
-	if len(records) != 1 {
-		t.Fatalf("want 1 record, got %d", len(records))
-	}
-	if records[0].StartTimeNs != int64(start) {
-		t.Errorf("start_time_ns = %d, want %d", records[0].StartTimeNs, start)
-	}
-	if records[0].EndTimeNs != int64(end) {
-		t.Errorf("end_time_ns = %d, want %d", records[0].EndTimeNs, end)
-	}
+	require.Len(t, records, 1)
+	assert.Equal(t, int64(start), records[0].StartTimeNs, "start_time_ns")
+	assert.Equal(t, int64(end), records[0].EndTimeNs, "end_time_ns")
 }
 
 // --- helpers ---

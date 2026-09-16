@@ -21,19 +21,19 @@ var (
 )
 
 type SpanRecord struct {
-	TraceID      [16]byte `json:"trace_id"`
-	SpanID       [8]byte  `json:"span_id"`
-	ParentSpanID [8]byte  `json:"parent_span_id"`
-	Service      string   `json:"service"`
-	Name         string   `json:"name"`
-	Kind         int32    `json:"kind"`
-	StartTimeNs  int64    `json:"start_time_ns"`
-	EndTimeNs    int64    `json:"end_time_ns"`
-	StatusError  bool     `json:"status_error"`
-	SizeBytes    int64    `json:"size_bytes"`
+	TraceID      [16]byte
+	SpanID       [8]byte
+	ParentSpanID [8]byte
+	Service      string
+	Name         string
+	Kind         int32
+	StartTimeNs  int64
+	EndTimeNs    int64
+	StatusError  bool
+	SizeBytes    int64
 	// OpAttrs is populated only for root spans (empty ParentSpanID); child
 	// spans leave it nil to save buffer memory.
-	OpAttrs map[string]string `json:"op_attrs,omitempty"`
+	OpAttrs map[string]string
 }
 
 // Finalizable pairs a trace with the trigger that selected it. When both

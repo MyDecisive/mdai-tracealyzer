@@ -1,8 +1,11 @@
 package buffer
 
 import (
-	"reflect"
+	"encoding/json/v2"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEncodeDecode_RoundTrip(t *testing.T) {
@@ -52,18 +55,57 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 			t.Parallel()
 
 			data, err := encodeRecord(tc.in)
-			if err != nil {
-				t.Fatalf("encode: %v", err)
-			}
+			require.NoError(t, err)
 			got, err := decodeRecord(data)
-			if err != nil {
-				t.Fatalf("decode: %v", err)
-			}
-			if !reflect.DeepEqual(got, tc.in) {
-				t.Fatalf("round-trip mismatch:\nwant %+v\n got %+v", tc.in, got)
-			}
+			require.NoError(t, err)
+			require.Equal(t, tc.in, got)
 		})
 	}
+}
+
+func TestEncodeRecord_HexWireFormat(t *testing.T) {
+	t.Parallel()
+
+	in := SpanRecord{
+		TraceID:      [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+		SpanID:       [8]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18},
+		ParentSpanID: [8]byte{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28},
+		Service:      "checkout",
+	}
+	data, err := encodeRecord(in)
+	require.NoError(t, err)
+
+	var wire struct {
+		TraceID      string `json:"trace_id"`
+		SpanID       string `json:"span_id"`
+		ParentSpanID string `json:"parent_span_id"`
+	}
+	require.NoError(t, json.Unmarshal(data, &wire), "unmarshal wire (data=%s)", data)
+	assert.Equal(t, "0102030405060708090a0b0c0d0e0f10", wire.TraceID)
+	assert.Equal(t, "1112131415161718", wire.SpanID)
+	assert.Equal(t, "2122232425262728", wire.ParentSpanID)
+}
+
+func TestDecodeRecord_BadHex(t *testing.T) {
+	t.Parallel()
+
+	bad := []byte(`{"trace_id":"zz","span_id":"1112131415161718","parent_span_id":"2122232425262728"}`)
+	_, err := decodeRecord(bad)
+	require.Error(t, err, "want error for non-hex trace_id")
+}
+
+func TestParseSpanID(t *testing.T) {
+	t.Parallel()
+
+	want := [8]byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}
+	got, err := parseSpanID("1122334455667788")
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+
+	_, err = parseSpanID("1122")
+	require.Error(t, err, "short input")
+	_, err = parseSpanID("zz22334455667788")
+	require.Error(t, err, "bad hex")
 }
 
 func TestTraceKey_AndHex(t *testing.T) {
@@ -72,20 +114,14 @@ func TestTraceKey_AndHex(t *testing.T) {
 	id := [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
 	wantHex := "0102030405060708090a0b0c0d0e0f10"
 
-	if got := traceIDHex(id); got != wantHex {
-		t.Errorf("traceIDHex: want %q, got %q", wantHex, got)
-	}
-	if got := traceKey(id); got != "trace:"+wantHex {
-		t.Errorf("traceKey: want %q, got %q", "trace:"+wantHex, got)
-	}
+	assert.Equal(t, wantHex, traceIDHex(id))
+	assert.Equal(t, "trace:"+wantHex, traceKey(id))
 }
 
 func TestSpanIDHex(t *testing.T) {
 	t.Parallel()
 
-	if got := spanIDHex([8]byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}); got != "1122334455667788" {
-		t.Errorf("spanIDHex: got %q", got)
-	}
+	assert.Equal(t, "1122334455667788", spanIDHex([8]byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}))
 }
 
 func TestParseTraceID(t *testing.T) {
@@ -95,17 +131,11 @@ func TestParseTraceID(t *testing.T) {
 	want := [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
 
 	got, err := parseTraceID(hex)
-	if err != nil {
-		t.Fatalf("parseTraceID: %v", err)
-	}
-	if got != want {
-		t.Errorf("parseTraceID mismatch: want %x, got %x", want, got)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
 
-	if _, err := parseTraceID("short"); err == nil {
-		t.Error("parseTraceID short: want error")
-	}
-	if _, err := parseTraceID("zz02030405060708090a0b0c0d0e0f10"); err == nil {
-		t.Error("parseTraceID bad hex: want error")
-	}
+	_, err = parseTraceID("short")
+	require.Error(t, err, "short input")
+	_, err = parseTraceID("zz02030405060708090a0b0c0d0e0f10")
+	require.Error(t, err, "bad hex")
 }

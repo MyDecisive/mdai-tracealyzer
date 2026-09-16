@@ -31,4 +31,5 @@ data:
     service:
       log_level: {{ .Values.config.service.logLevel | quote }}
       metrics_endpoint: {{ .Values.config.service.metricsEndpoint | quote }}
+      pprof_endpoint: {{ .Values.config.service.pprofEndpoint | quote }}
       shutdown_grace: {{ .Values.config.service.shutdownGrace | quote }}

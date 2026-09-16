@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/run"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -82,7 +84,7 @@ func waitForCondition(t *testing.T, cond func() bool) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("condition never became true within 1s")
+	require.Fail(t, "condition never became true within 1s")
 }
 
 func eventsByPrefix(events []string, prefix string) []string {
@@ -113,9 +115,7 @@ func TestSupervisor_StartIsSequentialInRegistrationOrder(t *testing.T) {
 	<-done
 
 	starts := eventsByPrefix(rec.snapshot(), "start:")
-	if want := []string{"a", "b", "c"}; !slices.Equal(starts, want) {
-		t.Fatalf("start order: want %v, got %v", want, starts)
-	}
+	require.Equal(t, []string{"a", "b", "c"}, starts, "start order")
 }
 
 func TestSupervisor_StartFailureShutsDownAllRegisteredInReverse(t *testing.T) {
@@ -129,27 +129,16 @@ func TestSupervisor_StartFailureShutsDownAllRegisteredInReverse(t *testing.T) {
 
 	err := sup.Run(t.Context())
 
-	if !errors.Is(err, bootErr) {
-		t.Fatalf("Run error: want wraps %v, got %v", bootErr, err)
-	}
-	if got := a.startCount.Load(); got != 1 {
-		t.Errorf("a.Start count: want 1, got %d", got)
-	}
-	if got := b.startCount.Load(); got != 1 {
-		t.Errorf("b.Start count: want 1, got %d", got)
-	}
-	if got := c.startCount.Load(); got != 0 {
-		t.Errorf("c.Start count: want 0 (b failed before c), got %d", got)
-	}
-	if a.shutdownCount.Load() != 1 || b.shutdownCount.Load() != 1 || c.shutdownCount.Load() != 1 {
-		t.Errorf("all components must be Shutdown after a Start failure; got a=%d b=%d c=%d",
-			a.shutdownCount.Load(), b.shutdownCount.Load(), c.shutdownCount.Load())
-	}
+	require.ErrorIs(t, err, bootErr, "Run error")
+	assert.Equal(t, int32(1), a.startCount.Load(), "a.Start count")
+	assert.Equal(t, int32(1), b.startCount.Load(), "b.Start count")
+	assert.Equal(t, int32(0), c.startCount.Load(), "c.Start count (b failed before c)")
+	assert.Equal(t, int32(1), a.shutdownCount.Load(), "a must be Shutdown after a Start failure")
+	assert.Equal(t, int32(1), b.shutdownCount.Load(), "b must be Shutdown after a Start failure")
+	assert.Equal(t, int32(1), c.shutdownCount.Load(), "c must be Shutdown after a Start failure")
 
 	enters := eventsByPrefix(rec.snapshot(), "shutdown_enter:")
-	if want := []string{"c", "b", "a"}; !slices.Equal(enters, want) {
-		t.Fatalf("shutdown order: want %v, got %v", want, enters)
-	}
+	require.Equal(t, []string{"c", "b", "a"}, enters, "shutdown order")
 }
 
 func TestSupervisor_HostFatalTriggersOrderedShutdown(t *testing.T) {
@@ -164,17 +153,11 @@ func TestSupervisor_HostFatalTriggersOrderedShutdown(t *testing.T) {
 
 	err := sup.Run(t.Context())
 
-	if !errors.Is(err, fatalErr) {
-		t.Fatalf("Run error: want wraps %v, got %v", fatalErr, err)
-	}
-	if a.shutdownCount.Load() != 1 || b.shutdownCount.Load() != 1 {
-		t.Fatalf("both must be Shutdown after fatal; got a=%d b=%d",
-			a.shutdownCount.Load(), b.shutdownCount.Load())
-	}
+	require.ErrorIs(t, err, fatalErr, "Run error")
+	require.Equal(t, int32(1), a.shutdownCount.Load(), "a must be Shutdown after fatal")
+	require.Equal(t, int32(1), b.shutdownCount.Load(), "b must be Shutdown after fatal")
 	enters := eventsByPrefix(rec.snapshot(), "shutdown_enter:")
-	if want := []string{"b", "a"}; !slices.Equal(enters, want) {
-		t.Fatalf("shutdown order: want %v, got %v", want, enters)
-	}
+	require.Equal(t, []string{"b", "a"}, enters, "shutdown order")
 }
 
 func TestSupervisor_HostFatalDoesNotBlockCaller(t *testing.T) {
@@ -201,11 +184,9 @@ func TestSupervisor_HostFatalDoesNotBlockCaller(t *testing.T) {
 	go func() { done <- sup.Run(t.Context()) }()
 	select {
 	case err := <-done:
-		if !errors.Is(err, fatalErr) {
-			t.Fatalf("Run error: want wraps %v, got %v", fatalErr, err)
-		}
+		require.ErrorIs(t, err, fatalErr, "Run error")
 	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return after Fatal — likely Fatal blocked the goroutine")
+		require.Fail(t, "Run did not return after Fatal — likely Fatal blocked the goroutine")
 	}
 }
 
@@ -232,11 +213,9 @@ func TestSupervisor_HostFatalAfterShutdownStartedIsSafe(t *testing.T) {
 	go func() { done <- sup.Run(t.Context()) }()
 	select {
 	case err := <-done:
-		if !errors.Is(err, firstFatal) {
-			t.Errorf("Run error must wrap firstFatal: %v", err)
-		}
+		require.ErrorIs(t, err, firstFatal, "Run error must wrap firstFatal")
 	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return — Fatal during shutdown phase likely deadlocked")
+		require.Fail(t, "Run did not return — Fatal during shutdown phase likely deadlocked")
 	}
 }
 
@@ -257,11 +236,9 @@ func TestSupervisor_CleanCtxCancelReturnsNil(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("Run on clean ctx-cancel must return nil, got %v", err)
-		}
+		require.NoError(t, err, "Run on clean ctx-cancel must return nil")
 	case <-time.After(time.Second):
-		t.Fatal("Run did not return after cancel")
+		require.Fail(t, "Run did not return after cancel")
 	}
 }
 
@@ -294,9 +271,7 @@ func TestSupervisor_ShutdownIsSequentialAndReverse(t *testing.T) {
 		"shutdown_enter:b", "shutdown_exit:b",
 		"shutdown_enter:a", "shutdown_exit:a",
 	}
-	if !slices.Equal(seq, want) {
-		t.Fatalf("shutdown sequence: want %v, got %v", want, seq)
-	}
+	require.Equal(t, want, seq, "shutdown sequence")
 }
 
 func TestSupervisor_ShutdownSafeWithoutPriorStart(t *testing.T) {
@@ -309,15 +284,9 @@ func TestSupervisor_ShutdownSafeWithoutPriorStart(t *testing.T) {
 
 	err := sup.Run(t.Context())
 
-	if !errors.Is(err, bootErr) {
-		t.Fatalf("Run error: want wraps %v, got %v", bootErr, err)
-	}
-	if got := b.startCount.Load(); got != 0 {
-		t.Errorf("b.Start must not run after a fails: count=%d", got)
-	}
-	if got := b.shutdownCount.Load(); got != 1 {
-		t.Errorf("b.Shutdown must run despite no prior Start: count=%d", got)
-	}
+	require.ErrorIs(t, err, bootErr, "Run error")
+	assert.Equal(t, int32(0), b.startCount.Load(), "b.Start must not run after a fails")
+	assert.Equal(t, int32(1), b.shutdownCount.Load(), "b.Shutdown must run despite no prior Start")
 }
 
 func TestSupervisor_PreShutdownHookRunsOnceBeforeAnyShutdown(t *testing.T) {
@@ -335,9 +304,8 @@ func TestSupervisor_PreShutdownHookRunsOnceBeforeAnyShutdown(t *testing.T) {
 		return a.startCount.Load() == 1 && b.startCount.Load() == 1
 	})
 	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+	err := <-done
+	require.NoError(t, err)
 
 	events := rec.snapshot()
 	preShutdowns := 0
@@ -346,9 +314,7 @@ func TestSupervisor_PreShutdownHookRunsOnceBeforeAnyShutdown(t *testing.T) {
 			preShutdowns++
 		}
 	}
-	if preShutdowns != 1 {
-		t.Errorf("preShutdown hook ran %d times, want 1", preShutdowns)
-	}
+	assert.Equal(t, 1, preShutdowns, "preShutdown hook run count")
 	preIdx := slices.Index(events, "preShutdown")
 	firstShutdown := -1
 	for i, e := range events {
@@ -357,12 +323,9 @@ func TestSupervisor_PreShutdownHookRunsOnceBeforeAnyShutdown(t *testing.T) {
 			break
 		}
 	}
-	if preIdx < 0 || firstShutdown < 0 {
-		t.Fatalf("missing preShutdown or shutdown events: %v", events)
-	}
-	if preIdx >= firstShutdown {
-		t.Fatalf("preShutdown must precede any Shutdown: preIdx=%d firstShutdown=%d", preIdx, firstShutdown)
-	}
+	require.GreaterOrEqual(t, preIdx, 0, "missing preShutdown event: %v", events)
+	require.GreaterOrEqual(t, firstShutdown, 0, "missing shutdown_enter event: %v", events)
+	require.Less(t, preIdx, firstShutdown, "preShutdown must precede any Shutdown")
 }
 
 func TestSupervisor_ShutdownReceivesUncanceledGraceCtx(t *testing.T) {
@@ -388,19 +351,12 @@ func TestSupervisor_ShutdownReceivesUncanceledGraceCtx(t *testing.T) {
 	go func() { done <- sup.Run(ctx) }()
 	waitForCondition(t, func() bool { return a.startCount.Load() == 1 })
 	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+	err := <-done
+	require.NoError(t, err)
 
-	if !observed {
-		t.Fatal("Shutdown not observed")
-	}
-	if !liveAtCall {
-		t.Error("Shutdown ctx was canceled at call time; supervisor must derive a fresh grace ctx via WithoutCancel")
-	}
-	if !hasDeadline {
-		t.Error("Shutdown ctx has no deadline; supervisor must apply the grace timeout")
-	}
+	require.True(t, observed, "Shutdown not observed")
+	assert.True(t, liveAtCall, "Shutdown ctx was canceled at call time; supervisor must derive a fresh grace ctx via WithoutCancel")
+	assert.True(t, hasDeadline, "Shutdown ctx has no deadline; supervisor must apply the grace timeout")
 }
 
 func TestSupervisor_CleanCtxCancelWithShutdownErrorReturnsOnlyShutdownError(t *testing.T) {
@@ -417,12 +373,8 @@ func TestSupervisor_CleanCtxCancelWithShutdownErrorReturnsOnlyShutdownError(t *t
 	cancel()
 
 	err := <-done
-	if !errors.Is(err, shutdownErr) {
-		t.Fatalf("err must wrap shutdownErr: %v", err)
-	}
-	if errors.Is(err, context.Canceled) {
-		t.Fatalf("err must not contain context.Canceled (clean cancel): %v", err)
-	}
+	require.ErrorIs(t, err, shutdownErr)
+	require.NotErrorIs(t, err, context.Canceled, "clean cancel must not surface context.Canceled")
 }
 
 func TestSupervisor_RunIsOneShot(t *testing.T) {
@@ -436,13 +388,11 @@ func TestSupervisor_RunIsOneShot(t *testing.T) {
 	go func() { done <- sup.Run(ctx) }()
 	waitForCondition(t, func() bool { return a.startCount.Load() == 1 })
 	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("first Run: %v", err)
-	}
+	err := <-done
+	require.NoError(t, err, "first Run")
 
-	if err := sup.Run(t.Context()); !errors.Is(err, run.ErrRunAlreadyCalled) {
-		t.Fatalf("second Run: want ErrRunAlreadyCalled, got %v", err)
-	}
+	err = sup.Run(t.Context())
+	require.ErrorIs(t, err, run.ErrRunAlreadyCalled, "second Run")
 }
 
 func TestSupervisor_ShutdownErrorsJoinedWithTrigger(t *testing.T) {
@@ -456,13 +406,7 @@ func TestSupervisor_ShutdownErrorsJoinedWithTrigger(t *testing.T) {
 	sup := run.New(time.Second, zap.NewNop(), a, b)
 
 	err := sup.Run(t.Context())
-	if !errors.Is(err, bootErr) {
-		t.Errorf("err must wrap bootErr: %v", err)
-	}
-	if !errors.Is(err, aShutdownErr) {
-		t.Errorf("err must wrap aShutdownErr: %v", err)
-	}
-	if !errors.Is(err, bShutdownErr) {
-		t.Errorf("err must wrap bShutdownErr: %v", err)
-	}
+	require.ErrorIs(t, err, bootErr)
+	require.ErrorIs(t, err, aShutdownErr)
+	require.ErrorIs(t, err, bShutdownErr)
 }

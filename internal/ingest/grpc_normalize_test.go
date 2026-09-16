@@ -6,6 +6,7 @@ import (
 
 	"github.com/mydecisive/mdai-tracealyzer/internal/ingest"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
@@ -56,12 +57,8 @@ func TestGRPCServer_MalformedSpansCountTowardRejectedSpans(t *testing.T) {
 	}
 
 	resp, err := client.Export(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Export: %v", err)
-	}
+	require.NoError(t, err)
 
 	got := resp.GetPartialSuccess().GetRejectedSpans()
-	if got < 2 {
-		t.Fatalf("PartialSuccess.RejectedSpans = %d, want >= 2 (two malformed spans dropped at Normalize)", got)
-	}
+	require.GreaterOrEqual(t, got, int64(2), "PartialSuccess.RejectedSpans: two malformed spans dropped at Normalize")
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"sync"
@@ -129,13 +130,17 @@ func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 		return fmt.Errorf("sweeper: %w", err)
 	}
 
-	adminListener, err := openAdminListener(ctx, cfg)
+	admin, err := newListenerComponent(ctx, "admin", cfg.Service.MetricsEndpoint, buildAdminMux(registry, ready))
 	if err != nil {
 		return err
 	}
-	admin := &adminComponent{
-		server:   newAdminServer(buildAdminMux(registry, ready)),
-		listener: adminListener,
+	listeners := []run.Component{admin}
+	if cfg.Service.PprofEndpoint != "" {
+		pprofComponent, err := newListenerComponent(ctx, "pprof", cfg.Service.PprofEndpoint, buildPprofMux())
+		if err != nil {
+			return errors.Join(err, admin.Shutdown(ctx))
+		}
+		listeners = append(listeners, pprofComponent)
 	}
 
 	grpcServer := ingest.NewGRPCServer(valkeyBuffer, cfg.Ingestion.OTLPGRPCEndpoint, ingestMetrics, logger)
@@ -156,6 +161,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 
 	logger.Info("service starting",
 		zap.String("metrics_endpoint", cfg.Service.MetricsEndpoint),
+		zap.String("pprof_endpoint", cfg.Service.PprofEndpoint),
 		zap.String("otlp_grpc_endpoint", cfg.Ingestion.OTLPGRPCEndpoint),
 		zap.String("otlp_http_endpoint", cfg.Ingestion.OTLPHTTPEndpoint),
 		zap.String("valkey_addr", cfg.Buffer.ValkeyAddr),
@@ -168,22 +174,23 @@ func serve(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	// Reverse Shutdown closes ingest before the sweeper waits on in-flight
 	// Drain, so a degraded Valkey can't keep HTTP/gRPC accepting traffic
 	// past the shutdown grace.
-	sup := run.New(cfg.Service.ShutdownGrace.Duration(), logger,
-		admin,
+	sup := run.New(cfg.Service.ShutdownGrace.Duration(), logger, append(listeners,
 		schemaProbe,
 		emitter,
 		emitterProbe,
 		sweeper,
 		grpcServer,
 		httpServer,
-	)
+	)...)
 	sup.OnShutdown(ready.MarkShuttingDown)
 	return sup.Run(ctx)
 }
 
-// adminComponent wraps the admin HTTP server with a pre-bound listener
-// so /healthz/live is reachable as soon as the supervisor enters Run.
-type adminComponent struct {
+// listenerComponent wraps an HTTP server with a pre-bound listener so its
+// handlers are reachable as soon as the supervisor enters Run, before the
+// OTLP servers complete their own bind-and-serve in Start.
+type listenerComponent struct {
+	name     string
 	server   *http.Server
 	listener net.Listener
 
@@ -193,33 +200,42 @@ type adminComponent struct {
 	closeErr  error
 }
 
-var _ run.Component = (*adminComponent)(nil)
+var _ run.Component = (*listenerComponent)(nil)
 
-func (*adminComponent) Name() string { return "admin" }
+func newListenerComponent(ctx context.Context, name, addr string, mux http.Handler) (*listenerComponent, error) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	return &listenerComponent{name: name, server: newAdminServer(mux), listener: ln}, nil
+}
 
-func (a *adminComponent) Start(_ context.Context, host run.Host) error {
-	a.serveDone = make(chan struct{})
-	a.started = true
+func (l *listenerComponent) Name() string { return l.name }
+
+func (l *listenerComponent) Start(_ context.Context, host run.Host) error {
+	l.serveDone = make(chan struct{})
+	l.started = true
 	go func() {
-		defer close(a.serveDone)
-		err := a.server.Serve(a.listener)
+		defer close(l.serveDone)
+		err := l.server.Serve(l.listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			host.Fatal("admin", err)
+			host.Fatal(l.name, err)
 		}
 	}()
 	return nil
 }
 
-func (a *adminComponent) Shutdown(ctx context.Context) error {
-	a.closeOnce.Do(func() {
-		if !a.started {
-			a.closeErr = a.listener.Close()
+func (l *listenerComponent) Shutdown(ctx context.Context) error {
+	l.closeOnce.Do(func() {
+		if !l.started {
+			l.closeErr = l.listener.Close()
 			return
 		}
-		a.closeErr = a.server.Shutdown(ctx)
-		<-a.serveDone
+		l.closeErr = l.server.Shutdown(ctx)
+		<-l.serveDone
 	})
-	return a.closeErr
+	return l.closeErr
 }
 
 func buildAdminMux(registry *prometheus.Registry, ready *app.Readiness) *http.ServeMux {
@@ -230,16 +246,14 @@ func buildAdminMux(registry *prometheus.Registry, ready *app.Readiness) *http.Se
 	return mux
 }
 
-// openAdminListener binds the admin endpoint up front so the readiness
-// and metrics handlers are reachable while the OTLP servers complete
-// their own bind-and-serve in Start.
-func openAdminListener(ctx context.Context, cfg *config.Config) (net.Listener, error) {
-	var lc net.ListenConfig
-	ln, err := lc.Listen(ctx, "tcp", cfg.Service.MetricsEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("listen on %s: %w", cfg.Service.MetricsEndpoint, err)
-	}
-	return ln, nil
+func buildPprofMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	return mux
 }
 
 // BaseContext returns context.Background() so in-flight requests are

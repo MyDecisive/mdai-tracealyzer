@@ -1,101 +1,80 @@
 # Tuning
 
-Operator guide to sizing tracealyzer for a given trace volume and freshness budget. All parameters are defined on `Config` (`internal/config/config.go`) and may be set through YAML fields or `TRACEALYZER_*` environment variables. Defaults below match `defaults()`.
+Operator guide to sizing tracealyzer for a trace volume, a freshness budget, and a rollout drop budget. Parameters are fields on `Config` (`internal/config/config.go`) and are set through the Helm chart's `config.*` values. An environment variable overrides a YAML field; the accepted name is the section-prefixed form shown below, and the bare tag (`QUIET_PERIOD`) resolves to the same field.
 
 ## Pipeline
 
 ```
 OTLP ─► ingest ─► buffer (Valkey) ─► sweeper ─► topology compute ─► emitter ─► GreptimeDB
-                  └─ per-trace hash    └─ N workers                   └─ in-process pending batch
 ```
 
-Three queues sit between stages: the per-trace Valkey hash, the sweeper's per-tick finalize work, and the emitter's pending batch. Tuning keeps all three drained without thrashing GreptimeDB or holding traces in Valkey past the freshness budget.
+Spans accumulate per trace in Valkey until the trace is quiet for `quiet_period` or has aged past `max_ttl`. The sweeper finalizes those traces every `sweep_interval`, computes topology rows, and hands them to the emitter, which writes to GreptimeDB in batches with retries.
 
 ## Parameters
 
-### Buffer (`buffer.*`)
+`Default` is the built-in value; `Chart` is what a Helm install runs.
 
-| Parameter | Env | Default | Raising | Lowering |
+| Parameter | Env | Default | Chart | Meaning |
 |---|---|---|---|---|
-| `quiet_period` | `TRACEALYZER_QUIET_PERIOD` | `60s` | Tolerates longer-tailed traces and reduces premature finalization (lower orphan rate). | Improves freshness at the cost of more partial-trace risk. |
-| `max_ttl` | `TRACEALYZER_MAX_TTL` | `10m` | Covers slower upstream traces; increases Valkey memory use. | Bounds buffer footprint; raises `trigger="max_ttl"` and orphan rates. |
-| `sweep_interval` | `TRACEALYZER_SWEEP_INTERVAL` | `5s` | Reduces Valkey scan QPS; raises finalization latency. | Finalizes sooner; raises Valkey scan QPS. |
-| `sweep_worker_pool_size` | `TRACEALYZER_SWEEP_WORKER_POOL_SIZE` | `runtime.NumCPU()` | Clears larger finalize backlogs per tick. | Reduces CPU and Valkey pressure; allows backlog growth. |
-| `valkey_operation_timeout` | `TRACEALYZER_VALKEY_OPERATION_TIMEOUT` | `10s` | Tolerates slower Valkey round trips; lengthens worst-case shutdown drain. | Improves shutdown liveness; raises the chance of an ambiguous Drain timeout under network stress (server processed `EXEC`, client read failed). |
+| `buffer.quiet_period` | `BUFFER_QUIET_PERIOD` | `60s` | `60s` | Idle time after the last span before a trace is finalized. Values below `sweep_interval` have no effect. |
+| `buffer.max_ttl` | `BUFFER_MAX_TTL` | `10m` | `10m` | Age at which a trace is finalized regardless of activity. Must exceed `quiet_period`. |
+| `buffer.sweep_interval` | `BUFFER_SWEEP_INTERVAL` | `5s` | `5s` | Finalization tick; the floor on finalization latency and the Valkey scan rate. |
+| `buffer.sweep_worker_pool_size` | `BUFFER_SWEEP_WORKER_POOL_SIZE` | `NumCPU` | `NumCPU` | Parallel finalizations per tick. `NumCPU` is the pod's, not the node's; set explicitly under a CPU limit. |
+| `buffer.valkey_operation_timeout` | `BUFFER_VALKEY_OPERATION_TIMEOUT` | `10s` | `10s` | Per-command Valkey deadline; bounds the sweeper's shutdown drain. |
+| `emitter.batch_size` | `EMITTER_BATCH_SIZE` | `100` | `100` | Rows per GreptimeDB write. |
+| `emitter.flush_interval` | `EMITTER_FLUSH_INTERVAL` | `1s` | `1s` | Maximum time a row waits for a full batch. |
+| `emitter.queue_capacity` | `EMITTER_QUEUE_CAPACITY` | `1024` | `1000` | Rows buffered ahead of the writer; rows beyond it are dropped. |
+| `emitter.max_retries` | `EMITTER_MAX_RETRIES` | `3` | `5` | Retries per batch after the first attempt. |
+| `emitter.initial_backoff` | `EMITTER_INITIAL_BACKOFF` | `1s` | `10s` | First retry delay; doubles per retry, capped at `60s`. |
+| `emitter.timeout` | `EMITTER_TIMEOUT` | `10s` | `10s` | Deadline per write attempt. |
+| `service.shutdown_grace` | `SERVICE_SHUTDOWN_GRACE` | `30s` | `30s` | Deadline for the whole shutdown sequence; see Shutdown. |
+| `service.log_level` | `SERVICE_LOG_LEVEL` | `info` | `info` | `debug` is for incident triage, not steady state. |
 
-### Emitter (`emitter.*`)
+## Shutdown
 
-| Parameter | Env | Default | Raising | Lowering |
-|---|---|---|---|---|
-| `batch_size` | `TRACEALYZER_BATCH_SIZE` | `100` | Reduces GreptimeDB writes per row; increases per-row staleness. | Improves freshness; raises write QPS. |
-| `flush_interval` | `TRACEALYZER_FLUSH_INTERVAL` | `1s` | Absorbs more rows per write under low volume. | Bounds row staleness; raises idle-flush QPS. |
-| `queue_capacity` | `TRACEALYZER_QUEUE_CAPACITY` | `1024` | Absorbs downstream stalls; increases memory use. | Surfaces backpressure earlier; rows are rejected sooner. |
-| `max_retries` | `TRACEALYZER_MAX_RETRIES` | `3` | Survives longer GreptimeDB outages. | Drops rows sooner on transient errors. |
-| `initial_backoff` | `TRACEALYZER_INITIAL_BACKOFF` | `1s` | Spaces retries further under load. | Retries sooner; risks retry storms. |
-| `timeout` | `TRACEALYZER_TIMEOUT` | `10s` | Tolerates slow GreptimeDB writes; lengthens stalls. | Cancels stuck writes earlier; causes avoidable retries. |
+On SIGTERM, components stop in reverse start order under a single `shutdown_grace` deadline: ingest servers, then the sweeper, then the emitter. The sweeper finishes its in-flight tick, bounded by `valkey_operation_timeout`. The emitter finishes the batch it is writing, then flushes queued rows in `batch_size` chunks. Every batch, in flight or queued, carries its own retry envelope:
 
-### Service (`service.*`)
+```
+envelope = timeout × (max_retries + 1) + Σ min(initial_backoff × 2ⁿ, 60s)   for n = 0 … max_retries − 1
+```
 
-| Parameter | Env | Default | Notes |
-|---|---|---|---|
-| `shutdown_grace` | `TRACEALYZER_SHUTDOWN_GRACE` | `30s` | Upper bound on orderly drain. Must exceed `flush_interval + timeout × (max_retries + 1)` *and* `valkey_operation_timeout` plus per-worker compute/emit overhead, or in-flight rows are dropped on rollout. |
-| `log_level` | `TRACEALYZER_LOG_LEVEL` | `info` | `debug` is appropriate for incident triage; not recommended for steady-state at high QPS. |
+The retry library stops the chain at 15 minutes of elapsed time regardless of the parameters.
+
+`shutdown_grace` covers `valkey_operation_timeout` plus one envelope for the in-flight batch; each queued chunk to be saved during a downstream outage needs another envelope. `terminationGracePeriodSeconds` exceeds `shutdown_grace`, since the kubelet sends SIGKILL at the pod grace period regardless of drain progress.
+
+Rows that miss the deadline are counted in `topology_emissions_failed_total` and logged under `drop topology rows` with reason `write retries canceled` (a batch mid-retry) or `shutdown grace expired` (rows still queued).
 
 ## Profiles
 
-### Low volume, freshness-first
-
-Short windows across the pipeline.
+Freshness-first, low volume. Confirms when `topology_finalization_trigger_total{trigger="max_ttl"}` stays a small share.
 
 ```yaml
 buffer:  { quiet_period: 15s, max_ttl: 2m, sweep_interval: 2s }
 emitter: { batch_size: 25,    flush_interval: 500ms }
 ```
 
-Trades GreptimeDB write QPS for sub-minute row latency. Monitor `topology_emissions_failed_total`; small batches amplify the impact of any write that fails after retry.
-
-### High volume, batch-oriented
-
-Wide windows and large batches with headroom for spikes.
+Throughput-first, high volume. Confirms when `topology_compute_duration_seconds` p99 and `topology_buffer_rejected_total` stay flat.
 
 ```yaml
 buffer:  { quiet_period: 90s, max_ttl: 15m, sweep_interval: 10s, sweep_worker_pool_size: 16 }
 emitter: { batch_size: 500,   flush_interval: 5s, queue_capacity: 8192 }
 ```
 
-Trades freshness for throughput. Scale `sweep_worker_pool_size` against finalize backlog rather than CPU count alone.
-
-### Unstable downstream
-
-Default cadence with extended retry budget and queue depth.
+Unstable downstream. The envelope is `9 × 20s + (2+4+8+16+32+60+60+60)s = 7m2s`, so the grace covers one in-flight batch with margin for the sweeper drain. Confirms when `topology_emissions_failed_total` stays flat through GreptimeDB outages.
 
 ```yaml
 emitter: { max_retries: 8, initial_backoff: 2s, queue_capacity: 16384, timeout: 20s }
-service: { shutdown_grace: 5m }
+service: { shutdown_grace: 8m }   # terminationGracePeriodSeconds ≥ 480
 ```
-
-Absorbs minute-scale GreptimeDB outages without dropping rows. `shutdown_grace` must exceed the worst-case retry chain.
 
 ## Diagnostics
 
 | Symptom | Action |
 |---|---|
-| `topology_buffer_rejected_total{reason="overflow"}` rising | Adjust Valkey `maxmemory`; this is out of process and not a tracealyzer parameter. |
-| `topology_buffer_rejected_total{reason="backend_error"}` rising | Investigate Valkey health; configuration changes will not help. |
-| `topology_finalization_trigger_total{trigger="max_ttl"}` share rising | Raise `quiet_period` or `max_ttl`; traces are exceeding the quiet check. |
-| `topology_compute_skipped_total{reason="no_root"}` rising | `max_ttl` is too short and traces are flushing before the root arrives, or upstream is truncating. Verify ingest before adjusting configuration. |
-| `topology_orphan_spans_total` / `topology_orphan_bytes_total` rising | Same root cause as `no_root`. Raise `max_ttl` first, then investigate upstream. |
-| `topology_root_id_collisions_total` non-zero | Two or more authentic roots in a single trace shared `(service, operation)`. The counter reports the number of rows merged away by the source-table primary key `(root_id, trace_id)`. The sweep WARN log carries `trace_id` and the merged-row count; query the source table for that `trace_id` to see the colliding `service::operation`. Investigate upstream: trace_id reuse in batch/queue code, 64-bit Datadog trace-id widening through the OTel `datadogreceiver`, or an SDK that emits `parent_id == 0` while a trace context is already active. |
-| `topology_compute_duration_seconds` p99 climbing | Raise `sweep_worker_pool_size`. If CPU-bound, the trace shape is the underlying cause. |
-| `topology_emissions_failed_total` rising | The counter is unlabeled; correlate with the `drop topology rows` warning logs and read the `reason` field. `write retries exhausted` or `write retries canceled` → raise `max_retries` and `initial_backoff` before adjusting `batch_size`; batch size does not address transient errors. `shutdown grace expired` (rises on rollouts) → raise `shutdown_grace` to cover the emitter retry envelope. `queue full` → raise `queue_capacity` or investigate writer throughput. `emitter closed` → late `Emit` after Shutdown, a lifecycle bug. |
-| `topology_drain_errors_total` rising | Investigate Valkey; configuration changes will not help. |
-
-## Constraints
-
-- `max_ttl ≤ quiet_period` is rejected by `Validate()`. `max_ttl` is the cap, not the target.
-- `quiet_period < sweep_interval` has no effect; the effective floor on finalization latency is `sweep_interval`.
-- Raising `batch_size` without raising `queue_capacity` shifts the bottleneck to the queue.
-- `flush_interval` is a freshness ceiling, not a throughput control. Lowering it raises GreptimeDB write QPS without increasing row throughput.
-- `shutdown_grace` must exceed `flush_interval + timeout × (max_retries + 1)` *and* `valkey_operation_timeout` plus per-worker compute/emit overhead, or rollouts drop in-flight rows.
-- `valkey_operation_timeout` should be less than `shutdown_grace` and large enough for normal Valkey round trips. Sweeper `Drain` is not cancelled by shutdown ctx; this is the bound that lets Shutdown return within grace. Lowering it improves shutdown liveness but increases the chance of an ambiguous Drain timeout under network stress.
-- `sweep_worker_pool_size` defaults to `runtime.NumCPU()` of the pod, not the node. Set it explicitly when running under a CPU limit.
+| `topology_buffer_rejected_total{reason="overflow"}` rising | Raise Valkey `maxmemory`; not a tracealyzer parameter. |
+| `topology_buffer_rejected_total{reason="backend_error"}` or `topology_drain_errors_total` rising | Investigate Valkey health. |
+| `topology_finalization_trigger_total{trigger="max_ttl"}` share rising | Raise `quiet_period` or `max_ttl`. |
+| `topology_compute_skipped_total{reason="no_root"}` or `topology_orphan_spans_total` rising | Raise `max_ttl`; if unchanged, upstream is truncating traces. |
+| `topology_root_id_collisions_total` non-zero | Multiple roots share `(service, operation)` in one trace; the sweep WARN log carries `trace_id`. Investigate upstream trace-id reuse. |
+| `topology_compute_duration_seconds` p99 climbing | Raise `sweep_worker_pool_size`. |
+| `topology_emissions_failed_total` rising | Read the `reason` field of the `drop topology rows` log. `write retries exhausted`: raise `max_retries` or `initial_backoff`. `queue full`: raise `queue_capacity`. `shutdown grace expired` or `write retries canceled` on rollouts: raise `shutdown_grace` per Shutdown. |

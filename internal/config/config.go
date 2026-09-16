@@ -74,6 +74,7 @@ type Emitter struct {
 type Service struct {
 	LogLevel        string   `envconfig:"LOG_LEVEL"        yaml:"log_level"`
 	MetricsEndpoint string   `envconfig:"METRICS_ENDPOINT" yaml:"metrics_endpoint"`
+	PprofEndpoint   string   `envconfig:"PPROF_ENDPOINT"   yaml:"pprof_endpoint"`
 	ShutdownGrace   Duration `envconfig:"SHUTDOWN_GRACE"   yaml:"shutdown_grace"`
 }
 
@@ -246,6 +247,7 @@ func defaults() Config {
 		Service: Service{
 			LogLevel:        "info",
 			MetricsEndpoint: "0.0.0.0:9090",
+			PprofEndpoint:   "127.0.0.1:6060",
 			ShutdownGrace:   Duration(defaultShutdownGrace),
 		},
 	}

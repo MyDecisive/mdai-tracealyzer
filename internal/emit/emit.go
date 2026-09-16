@@ -386,8 +386,8 @@ func newMetrics(reg prometheus.Registerer) (metrics, error) {
 		reg = prometheus.NewRegistry()
 	}
 	if err := reg.Register(counter); err != nil {
-		var already prometheus.AlreadyRegisteredError
-		if !errors.As(err, &already) {
+		already, ok := errors.AsType[prometheus.AlreadyRegisteredError](err)
+		if !ok {
 			return metrics{}, fmt.Errorf("register emitter metrics: %w", err)
 		}
 		existing, ok := already.ExistingCollector.(prometheus.Counter)
